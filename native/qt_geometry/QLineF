@@ -1,0 +1,20 @@
+#pragma once
+#include "QPointF"
+#include <cmath>
+// Minimal geometry adapter: avoids linking the Qt UI into the Rust viewer.
+class QLineF {
+    QPointF a, b;
+public:
+    enum IntersectionType { NoIntersection, BoundedIntersection, UnboundedIntersection };
+    QLineF(QPointF p, QPointF q) : a(p), b(q) {}
+    IntersectionType intersects(const QLineF &other, QPointF *out) const {
+        const double rx = b.px-a.px, ry = b.py-a.py;
+        const double sx = other.b.px-other.a.px, sy = other.b.py-other.a.py;
+        const double det = rx*sy-ry*sx;
+        if (det == 0 || !std::isfinite(det)) return NoIntersection;
+        const double dx = other.a.px-a.px, dy = other.a.py-a.py;
+        const double t = (dx*sy-dy*sx)/det, u = (dx*ry-dy*rx)/det;
+        *out = QPointF(a.px+t*rx, a.py+t*ry);
+        return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? BoundedIntersection : UnboundedIntersection;
+    }
+};

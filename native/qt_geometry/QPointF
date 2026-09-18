@@ -1,0 +1,7 @@
+#pragma once
+// The only Qt point operations used by Bandage's FMMM split untangler.
+class QPointF {
+public:
+    double px, py;
+    QPointF(double x = 0, double y = 0) : px(x), py(y) {}
+};
