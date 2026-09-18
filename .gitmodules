@@ -1,0 +1,3 @@
+[submodule "Bandage"]
+	path = Bandage
+	url = https://github.com/rrwick/Bandage?tab=GPL-3.0-1-ov-file
