@@ -14,7 +14,7 @@ use anyhow::Result;
 use argh::FromArgs;
 
 #[derive(FromArgs)]
-/// GFA Visualizer - optimized for large assembly graphs
+/// Graphite - optimized for large assembly graphs
 struct Args {
     /// GFA file to open on startup
     #[argh(positional)]
@@ -28,15 +28,18 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("GFA Visualizer")
+            .with_title("Graphite")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default()),
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/graphite-icon.png"))
+                    .expect("bundled Graphite icon must be a valid PNG"),
+            ),
         ..Default::default()
     };
 
     eframe::run_native(
-        "GFA Visualizer",
+        "Graphite",
         native_options,
         Box::new(|cc| Ok(Box::new(app::GfaApp::new(cc, args.file)) as Box<dyn eframe::App>)),
     )

@@ -1526,26 +1526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gfa-viz"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "argh",
- "cc",
- "eframe",
- "egui",
- "env_logger",
- "image",
- "log",
- "memmap2",
- "rayon",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "gif"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1672,6 +1652,26 @@ dependencies = [
  "presser",
  "thiserror 2.0.20",
  "windows",
+]
+
+[[package]]
+name = "graphite"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "argh",
+ "cc",
+ "eframe",
+ "egui",
+ "env_logger",
+ "image",
+ "log",
+ "memmap2",
+ "rayon",
+ "rfd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,6 +1,10 @@
-# GFA Visualizer
+# Graphite
 
-GFA Visualizer is a fast desktop viewer for large assembly graphs. It retains the familiar initial placement of Bandage while remaining responsive with large GFA files. The parser memory-maps input, layouts run away from the UI thread, and rendering uses level-of-detail so navigation remains practical as assemblies grow.
+<p align="center">
+  <img src="assets/graphite-icon.png" width="128" alt="Graphite graph icon">
+</p>
+
+Graphite is a fast desktop viewer for large assembly graphs. Its name reflects a graph structure and its dark, precise technical aesthetic. It retains the familiar initial placement of Bandage while remaining responsive with large GFA files. The parser memory-maps input, layouts run away from the UI thread, and rendering uses level-of-detail so navigation remains practical as assemblies grow.
 
 The project uses the bundled Bandage OGDF/FMMM code for initial placement of connected, non-circular components. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
 
@@ -33,7 +37,7 @@ sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbc
 
 ```bash
 cargo build --release
-./target/release/gfa-viz path/to/assembly.gfa
+./target/release/graphite path/to/assembly.gfa
 ```
 
 The file argument is optional: without it, use **File → Open GFA…**.
@@ -42,7 +46,7 @@ To create the Windows release executable from Linux/WSL:
 
 ```bash
 cargo xwin build --release --target x86_64-pc-windows-msvc
-./target/x86_64-pc-windows-msvc/release/gfa-viz.exe path/to/assembly.gfa
+./target/x86_64-pc-windows-msvc/release/graphite.exe path/to/assembly.gfa
 ```
 
 `build.rs` supplies an `llvm-lib` compatibility wrapper for `cargo-xwin`, so a separately installed `llvm-lib` is not required.
@@ -103,4 +107,7 @@ native/
   bandage_layout.cpp  bridge to bundled Bandage OGDF layout code
 Bandage/
   bundled Bandage and OGDF source used by the initial layout
+assets/
+  graphite-icon.png  application and README icon
+  graphite-icon.ico  multi-resolution Windows icon
 ```
