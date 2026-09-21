@@ -7,7 +7,6 @@ const COARSE_TARGET: usize = 256;
 const MAX_LEVELS: usize = 20;
 const THETA: f32 = 0.72;
 const EPSILON: f32 = 1.0e-4;
-const GOLDEN_ANGLE: f32 = 2.399_963_1;
 
 #[derive(Clone, Copy, Debug)]
 struct Edge {
@@ -28,6 +27,7 @@ struct Level {
 struct ComponentWork {
     global_nodes: Vec<usize>,
     edges: Vec<Edge>,
+    initial_positions: Vec<Pos2>,
 }
 
 struct ComponentResult {
@@ -46,9 +46,14 @@ pub fn initial_layout(
     from: &[u32],
     to: &[u32],
     lengths: &[f32],
+    initial_positions: &[Pos2],
     output: &mut [Pos2],
 ) -> Result<(), &'static str> {
-    if from.len() != to.len() || from.len() != lengths.len() || output.len() != node_count {
+    if from.len() != to.len()
+        || from.len() != lengths.len()
+        || initial_positions.len() != node_count
+        || output.len() != node_count
+    {
         return Err("layout input buffers have inconsistent lengths");
     }
     if node_count == 0 {
@@ -71,7 +76,7 @@ pub fn initial_layout(
         });
     }
 
-    let components = split_components(node_count, &edges);
+    let components = split_components(node_count, &edges, initial_positions);
     let solved: Vec<ComponentResult> = components
         .into_par_iter()
         .map(solve_component)
@@ -90,7 +95,11 @@ pub fn initial_layout(
     }
 }
 
-fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
+fn split_components(
+    node_count: usize,
+    edges: &[Edge],
+    initial_positions: &[Pos2],
+) -> Vec<ComponentWork> {
     let mut dsu = DisjointSet::new(node_count);
     for edge in edges {
         dsu.union(edge.a as usize, edge.b as usize);
@@ -137,9 +146,16 @@ fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
     global_nodes
         .into_iter()
         .zip(component_edges)
-        .map(|(global_nodes, edges)| ComponentWork {
-            global_nodes,
-            edges,
+        .map(|(global_nodes, edges)| {
+            let initial_positions = global_nodes
+                .iter()
+                .map(|&global| initial_positions[global])
+                .collect();
+            ComponentWork {
+                global_nodes,
+                edges,
+                initial_positions,
+            }
         })
         .collect()
 }
@@ -153,7 +169,7 @@ fn solve_component(work: ComponentWork) -> ComponentResult {
             let length = work.edges.first().map_or(100.0, |edge| edge.desired);
             vec![[-0.5 * length, 0.0], [0.5 * length, 0.0]]
         }
-        _ => solve_multilevel(node_count, work.edges),
+        _ => solve_multilevel(node_count, work.edges, work.initial_positions),
     };
     ComponentResult {
         global_nodes: work.global_nodes,
@@ -161,13 +177,18 @@ fn solve_component(work: ComponentWork) -> ComponentResult {
     }
 }
 
-fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
+fn solve_multilevel(
+    node_count: usize,
+    edges: Vec<Edge>,
+    initial_positions: Vec<Pos2>,
+) -> Vec<Pos2> {
     let mut levels = vec![Level {
         node_count,
         edges,
         masses: vec![1.0; node_count],
         to_coarse: None,
     }];
+    let mut level_seeds = vec![initial_positions];
 
     while levels
         .last()
@@ -175,17 +196,21 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
         && levels.len() < MAX_LEVELS
     {
         let current = levels.last().expect("level exists");
-        let (coarse, map) = coarsen(current);
+        let current_seed = level_seeds.last().expect("seed level exists");
+        let (coarse, map, coarse_seed) = coarsen(current, current_seed);
         if coarse.node_count >= current.node_count.saturating_sub(current.node_count / 20) {
             break;
         }
         levels.last_mut().expect("level exists").to_coarse = Some(map);
         levels.push(coarse);
+        level_seeds.push(coarse_seed);
     }
 
+    // Keep Graphite's length-aware BFS placement as the geometric prior.
+    // The force solver refines it instead of replacing it with a radial seed.
     let coarsest = levels.last().expect("at least one level");
-    let coarse_scale = mean_edge_length(coarsest).max(20.0);
-    let mut positions = deterministic_seed(coarsest.node_count, coarse_scale);
+    let mut positions = level_seeds.last().expect("coarsest seed exists").clone();
+    center(&mut positions);
     relax(
         coarsest,
         &mut positions,
@@ -198,12 +223,22 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
             .to_coarse
             .as_ref()
             .expect("fine multilevel level must map to its parent");
+        let fine_seed = &level_seeds[level_index];
+        let parent_seed = &level_seeds[level_index + 1];
         let scale = mean_edge_length(level).max(20.0);
         let mut fine = vec![[0.0; 2]; level.node_count];
         for node in 0..level.node_count {
-            let parent = positions[map[node] as usize];
-            let jitter = deterministic_jitter(node, scale * 0.08);
-            fine[node] = [parent[0] + jitter[0], parent[1] + jitter[1]];
+            let parent_index = map[node] as usize;
+            let parent = positions[parent_index];
+            let local_offset = [
+                fine_seed[node][0] - parent_seed[parent_index][0],
+                fine_seed[node][1] - parent_seed[parent_index][1],
+            ];
+            let jitter = deterministic_jitter(node, scale * 0.015);
+            fine[node] = [
+                parent[0] + local_offset[0] * 0.9 + jitter[0],
+                parent[1] + local_offset[1] * 0.9 + jitter[1],
+            ];
         }
         positions = fine;
         relax(
@@ -217,7 +252,7 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
     positions
 }
 
-fn coarsen(level: &Level) -> (Level, Vec<u32>) {
+fn coarsen(level: &Level, positions: &[Pos2]) -> (Level, Vec<u32>, Vec<Pos2>) {
     let mut map = vec![u32::MAX; level.node_count];
     let mut coarse_count = 0u32;
 
@@ -240,8 +275,17 @@ fn coarsen(level: &Level) -> (Level, Vec<u32>) {
     }
 
     let mut masses = vec![0.0f32; coarse_count as usize];
+    let mut coarse_positions = vec![[0.0f32; 2]; coarse_count as usize];
     for (fine, &coarse) in map.iter().enumerate() {
-        masses[coarse as usize] += level.masses[fine];
+        let mass = level.masses[fine];
+        masses[coarse as usize] += mass;
+        coarse_positions[coarse as usize][0] += positions[fine][0] * mass;
+        coarse_positions[coarse as usize][1] += positions[fine][1] * mass;
+    }
+    for (position, &mass) in coarse_positions.iter_mut().zip(&masses) {
+        let inv = 1.0 / mass.max(EPSILON);
+        position[0] *= inv;
+        position[1] *= inv;
     }
 
     let mut aggregated: AHashMap<(u32, u32), (f32, f32)> = AHashMap::new();
@@ -278,17 +322,8 @@ fn coarsen(level: &Level) -> (Level, Vec<u32>) {
             to_coarse: None,
         },
         map,
+        coarse_positions,
     )
-}
-
-fn deterministic_seed(node_count: usize, scale: f32) -> Vec<Pos2> {
-    (0..node_count)
-        .map(|index| {
-            let angle = index as f32 * GOLDEN_ANGLE;
-            let radius = scale * (index as f32 + 1.0).sqrt() * 0.75;
-            [angle.cos() * radius, angle.sin() * radius]
-        })
-        .collect()
 }
 
 fn deterministic_jitter(index: usize, radius: f32) -> Pos2 {
@@ -315,15 +350,15 @@ fn mean_edge_length(level: &Level) -> f32 {
 
 fn iterations_for(node_count: usize, coarsest: bool) -> usize {
     if coarsest {
-        80
+        36
     } else if node_count <= 2_000 {
-        40
+        20
     } else if node_count <= 20_000 {
-        24
-    } else if node_count <= 100_000 {
         12
+    } else if node_count <= 100_000 {
+        7
     } else {
-        6
+        4
     }
 }
 
@@ -332,7 +367,7 @@ fn relax(level: &Level, positions: &mut [Pos2], iterations: usize) {
         return;
     }
     let natural = mean_edge_length(level).max(10.0);
-    let repulsion_scale = natural * natural * 0.7;
+    let repulsion_scale = natural * natural;
     let mut forces = vec![[0.0f32; 2]; positions.len()];
 
     for iteration in 0..iterations {
@@ -351,8 +386,16 @@ fn relax(level: &Level, positions: &mut [Pos2], iterations: usize) {
             let dx = positions[b][0] - positions[a][0];
             let dy = positions[b][1] - positions[a][1];
             let dist = (dx * dx + dy * dy).sqrt().max(EPSILON);
-            let stretch = dist - edge.desired;
-            let magnitude = stretch * 0.085 * edge.weight.sqrt();
+            let desired = edge.desired.max(1.0);
+            let ratio = (dist / desired).max(EPSILON);
+
+            // Match the shape of Bandage/OGDF's fmNew attraction:
+            // log2(d/l) * d^2/l^3, then scaled by the graph's mean
+            // ideal edge length squared. This becomes much stronger than
+            // repulsion for badly stretched edges, preventing annular blow-up.
+            let attraction =
+                natural * natural * ratio.log2() * dist * dist / (desired * desired * desired);
+            let magnitude = attraction * edge.weight.sqrt();
             let fx = dx / dist * magnitude;
             let fy = dy / dist * magnitude;
             forces[a][0] += fx;
@@ -362,7 +405,7 @@ fn relax(level: &Level, positions: &mut [Pos2], iterations: usize) {
         }
 
         let progress = iteration as f32 / iterations.max(1) as f32;
-        let temperature = natural * (0.35 * (-3.5 * progress).exp() + 0.015);
+        let temperature = natural * (0.18 * (-3.5 * progress).exp() + 0.008);
         positions
             .par_iter_mut()
             .zip(forces.par_iter())
@@ -672,8 +715,11 @@ mod tests {
         let from: Vec<_> = edges.iter().map(|edge| edge.0).collect();
         let to: Vec<_> = edges.iter().map(|edge| edge.1).collect();
         let lengths = vec![100.0; edges.len()];
+        let initial: Vec<Pos2> = (0..node_count)
+            .map(|index| [index as f32 * 100.0, 0.0])
+            .collect();
         let mut output = vec![[0.0; 2]; node_count];
-        initial_layout(node_count, &from, &to, &lengths, &mut output).unwrap();
+        initial_layout(node_count, &from, &to, &lengths, &initial, &mut output).unwrap();
         output
     }
 
