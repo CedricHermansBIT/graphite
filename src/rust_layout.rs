@@ -206,11 +206,13 @@ fn solve_multilevel(
         level_seeds.push(coarse_seed);
     }
 
-    // Keep Graphite's length-aware BFS placement as the geometric prior.
-    // The force solver refines it instead of replacing it with a radial seed.
+    // The coarsest level must break the collinear symmetry of long assembly
+    // paths. Bandage/OGDF also starts its coarsest force solve from a random
+    // placement. We use a deterministic pseudo-random square so repeated runs
+    // remain reproducible, then restore local topology while prolongating.
     let coarsest = levels.last().expect("at least one level");
-    let mut positions = level_seeds.last().expect("coarsest seed exists").clone();
-    center(&mut positions);
+    let coarse_scale = mean_edge_length(coarsest).max(20.0);
+    let mut positions = deterministic_coarse_seed(coarsest.node_count, coarse_scale);
     relax(
         coarsest,
         &mut positions,
@@ -234,10 +236,17 @@ fn solve_multilevel(
                 fine_seed[node][0] - parent_seed[parent_index][0],
                 fine_seed[node][1] - parent_seed[parent_index][1],
             ];
-            let jitter = deterministic_jitter(node, scale * 0.015);
+            let jitter = deterministic_jitter(node, scale * 0.05);
+            let offset_len =
+                (local_offset[0] * local_offset[0] + local_offset[1] * local_offset[1]).sqrt();
+            let offset_scale = if offset_len > scale * 0.65 {
+                scale * 0.65 / offset_len
+            } else {
+                1.0
+            };
             fine[node] = [
-                parent[0] + local_offset[0] * 0.9 + jitter[0],
-                parent[1] + local_offset[1] * 0.9 + jitter[1],
+                parent[0] + local_offset[0] * offset_scale + jitter[0],
+                parent[1] + local_offset[1] * offset_scale + jitter[1],
             ];
         }
         positions = fine;
@@ -324,6 +333,32 @@ fn coarsen(level: &Level, positions: &[Pos2]) -> (Level, Vec<u32>, Vec<Pos2>) {
         map,
         coarse_positions,
     )
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn unit_from_hash(value: u64) -> f32 {
+    ((value >> 40) as u32) as f32 / 16_777_215.0
+}
+
+fn deterministic_coarse_seed(node_count: usize, natural: f32) -> Vec<Pos2> {
+    let side = natural * (node_count as f32).sqrt().max(2.0) * 0.9;
+    let half = side * 0.5;
+    (0..node_count)
+        .map(|index| {
+            let base = splitmix64(index as u64 ^ 0xA24B_AED4_963E_E407);
+            let other = splitmix64(base ^ 0x9FB2_1C65_1E98_DF25);
+            [
+                (unit_from_hash(base) * 2.0 - 1.0) * half,
+                (unit_from_hash(other) * 2.0 - 1.0) * half,
+            ]
+        })
+        .collect()
 }
 
 fn deterministic_jitter(index: usize, radius: f32) -> Pos2 {
