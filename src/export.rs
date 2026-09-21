@@ -6,7 +6,7 @@ use egui::Color32;
 use image::{ImageBuffer, Rgba};
 
 use crate::gfa::GfaGraph;
-use crate::graph::ViewGraph;
+use crate::graph::{EdgeKind, ViewGraph};
 use crate::layout::Layout;
 use crate::render::{color_for_node, RenderParams};
 use crate::selection::Selection;
@@ -122,8 +122,13 @@ pub fn export_svg(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
             crate::gfa::Strand::Forward => layout.start(edge.to),
             crate::gfa::Strand::Reverse => layout.end(edge.to),
         });
+        let dash = if matches!(edge.kind, EdgeKind::Jump { .. }) {
+            " stroke-dasharray=\"8 6\""
+        } else {
+            ""
+        };
         output.push_str(&format!(
-            "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{}\" stroke-opacity=\"{:.3}\" stroke-width=\"1.2\"/>\n",
+            "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{}\" stroke-opacity=\"{:.3}\" stroke-width=\"1.2\"{dash}/>\n",
             a.0, a.1, b.0, b.1, svg_color(params.canvas_foreground, 255), params.edge_opacity
         ));
     }
@@ -185,7 +190,11 @@ pub fn export_png(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
             crate::gfa::Strand::Forward => layout.start(edge.to),
             crate::gfa::Strand::Reverse => layout.end(edge.to),
         });
-        draw_line(&mut image, a, b, params.canvas_foreground, edge_alpha, 1);
+        if matches!(edge.kind, EdgeKind::Jump { .. }) {
+            draw_dashed_line(&mut image, a, b, params.canvas_foreground, edge_alpha, 1);
+        } else {
+            draw_line(&mut image, a, b, params.canvas_foreground, edge_alpha, 1);
+        }
     }
     for (index, node) in graph.nodes.iter().enumerate() {
         if index >= layout.num_nodes() {
@@ -236,6 +245,39 @@ impl FigureTransform {
             self.margin + (point[0] - self.min_x) * self.scale,
             self.margin + (point[1] - self.min_y) * self.scale,
         )
+    }
+}
+
+fn draw_dashed_line(
+    image: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    from: (f32, f32),
+    to: (f32, f32),
+    color: Color32,
+    alpha: u8,
+    thickness: i32,
+) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= f32::EPSILON {
+        return;
+    }
+    let ux = dx / length;
+    let uy = dy / length;
+    let dash = 8.0_f32;
+    let gap = 6.0_f32;
+    let mut offset = 0.0_f32;
+    while offset < length {
+        let end = (offset + dash).min(length);
+        draw_line(
+            image,
+            (from.0 + ux * offset, from.1 + uy * offset),
+            (from.0 + ux * end, from.1 + uy * end),
+            color,
+            alpha,
+            thickness,
+        );
+        offset += dash + gap;
     }
 }
 
