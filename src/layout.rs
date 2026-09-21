@@ -1116,7 +1116,7 @@ impl Drop for LayoutRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EdgeInfo, NodeInfo};
+    use crate::graph::{EdgeInfo, EdgeKind, NodeInfo};
 
     fn graph(lengths: &[f32], links: &[(usize, Strand, usize, Strand)]) -> ViewGraph {
         ViewGraph {
@@ -1139,6 +1139,7 @@ mod tests {
                     from_strand,
                     to,
                     to_strand,
+                    kind: EdgeKind::Link,
                 })
                 .collect(),
             seg_to_node: Default::default(),
