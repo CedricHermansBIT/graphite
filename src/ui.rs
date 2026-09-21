@@ -415,9 +415,23 @@ pub fn stats_panel(ui: &mut Ui, stats: &AssemblyStats, view_graph: &ViewGraph) {
                     ui.end_row();
                 };
 
+                row("GFA version", stats.gfa_version.label().to_string());
                 row("Segments shown", format_count(view_graph.node_count()));
                 row("Segments total", format_count(stats.num_segments));
-                row("Links shown", format_count(view_graph.edge_count()));
+                row("Connections shown", format_count(view_graph.edge_count()));
+                row("Links total", format_count(stats.num_links));
+                if stats.num_jumps > 0 {
+                    row("Jumps", format_count(stats.num_jumps));
+                }
+                if stats.num_containments > 0 {
+                    row("Containments", format_count(stats.num_containments));
+                }
+                if stats.num_paths > 0 {
+                    row("Paths", format_count(stats.num_paths));
+                }
+                if stats.num_walks > 0 {
+                    row("Walks", format_count(stats.num_walks));
+                }
                 row("Total length", format_bp(stats.total_length));
                 row("N50", format_bp(stats.n50));
                 row("L50", format_count(stats.l50));
