@@ -8,7 +8,7 @@
 use egui::{Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 
 use crate::filter::ColorMode;
-use crate::gfa::Strand;
+use crate::gfa::{GfaGraph, PathConnection, Strand};
 use crate::graph::{EdgeKind, NodeInfo, ViewGraph};
 use crate::layout::Layout;
 use crate::selection::Selection;
@@ -271,6 +271,347 @@ pub fn draw_graph(
                 }
             }
         }
+    }
+}
+
+/// Draw parsed GFA1 metadata overlays on top of the base assembly graph.
+///
+/// Paths and walks highlight their oriented segment traversal. Containments
+/// attach to the corresponding fractional position along the drawn container
+/// polyline. Filtered-out segments are skipped rather than forcing them back
+/// into the current view.
+pub fn draw_gfa_overlays(
+    painter: &Painter,
+    viewport: Rect,
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) {
+    const PATH_COLOR: Color32 = Color32::from_rgb(245, 170, 55);
+    const WALK_COLOR: Color32 = Color32::from_rgb(65, 205, 220);
+    const CONTAINMENT_COLOR: Color32 = Color32::from_rgb(190, 125, 235);
+
+    if show_containments {
+        let stroke = Stroke::new(1.5, CONTAINMENT_COLOR.gamma_multiply(0.85));
+        for containment in &gfa.containments {
+            let Some(&container_node) = graph.seg_to_node.get(&containment.container) else {
+                continue;
+            };
+            let Some(&contained_node) = graph.seg_to_node.get(&containment.contained) else {
+                continue;
+            };
+            if container_node >= layout.num_nodes() || contained_node >= layout.num_nodes() {
+                continue;
+            }
+
+            let container_len = gfa
+                .segments
+                .get(containment.container)
+                .map_or(1, |segment| segment.length.max(1));
+            let mut fraction =
+                (containment.position as f32 / container_len as f32).clamp(0.0, 1.0);
+            if matches!(containment.container_strand, Strand::Reverse) {
+                fraction = 1.0 - fraction;
+            }
+
+            let source = world_to_screen(
+                layout.point_at_fraction(container_node, fraction),
+                viewport,
+                params,
+            );
+            let target = world_to_screen(
+                oriented_entry(layout, contained_node, containment.contained_strand),
+                viewport,
+                params,
+            );
+            if !viewport.intersects(Rect::from_two_pos(source, target).expand(4.0)) {
+                continue;
+            }
+
+            draw_dashed_segment_pattern(painter, source, target, stroke, 2.0, 4.0);
+            painter.circle_filled(source, 2.5, CONTAINMENT_COLOR);
+        }
+    }
+
+    if let Some(path_index) = selected_path {
+        if let Some(path) = gfa.paths.get(path_index) {
+            let steps = gfa.path_steps(path);
+            draw_path_like_overlay(
+                painter,
+                viewport,
+                graph,
+                layout,
+                params,
+                steps.iter().map(|step| (step.segment, step.strand)),
+                PATH_COLOR,
+                5.0,
+            );
+
+            for pair_index in 0..steps.len().saturating_sub(1) {
+                let from = steps[pair_index];
+                let to = steps[pair_index + 1];
+                let (Some(&from_node), Some(&to_node)) = (
+                    graph.seg_to_node.get(&from.segment),
+                    graph.seg_to_node.get(&to.segment),
+                ) else {
+                    continue;
+                };
+                if from_node >= layout.num_nodes() || to_node >= layout.num_nodes() {
+                    continue;
+                }
+                let a = world_to_screen(
+                    oriented_exit(layout, from_node, from.strand),
+                    viewport,
+                    params,
+                );
+                let b = world_to_screen(
+                    oriented_entry(layout, to_node, to.strand),
+                    viewport,
+                    params,
+                );
+                let stroke = Stroke::new(3.0, PATH_COLOR.gamma_multiply(0.9));
+                if matches!(from.connection_to_next, Some(PathConnection::Jump)) {
+                    draw_dashed_segment(painter, a, b, stroke);
+                } else {
+                    painter.line_segment([a, b], stroke);
+                }
+            }
+        }
+    }
+
+    if let Some(walk_index) = selected_walk {
+        if let Some(walk) = gfa.walks.get(walk_index) {
+            let steps = gfa.walk_steps(walk);
+            draw_path_like_overlay(
+                painter,
+                viewport,
+                graph,
+                layout,
+                params,
+                steps.iter().map(|step| (step.segment, step.strand)),
+                WALK_COLOR,
+                4.0,
+            );
+
+            for pair in steps.windows(2) {
+                let from = pair[0];
+                let to = pair[1];
+                let (Some(&from_node), Some(&to_node)) = (
+                    graph.seg_to_node.get(&from.segment),
+                    graph.seg_to_node.get(&to.segment),
+                ) else {
+                    continue;
+                };
+                if from_node >= layout.num_nodes() || to_node >= layout.num_nodes() {
+                    continue;
+                }
+                let a = world_to_screen(
+                    oriented_exit(layout, from_node, from.strand),
+                    viewport,
+                    params,
+                );
+                let b = world_to_screen(
+                    oriented_entry(layout, to_node, to.strand),
+                    viewport,
+                    params,
+                );
+                painter.line_segment(
+                    [a, b],
+                    Stroke::new(2.5, WALK_COLOR.gamma_multiply(0.85)),
+                );
+            }
+        }
+    }
+
+    draw_overlay_legend(
+        painter,
+        viewport,
+        gfa,
+        selected_path,
+        selected_walk,
+        show_containments,
+        PATH_COLOR,
+        WALK_COLOR,
+        CONTAINMENT_COLOR,
+        params,
+    );
+}
+
+fn draw_path_like_overlay<I>(
+    painter: &Painter,
+    viewport: Rect,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    steps: I,
+    color: Color32,
+    width: f32,
+) where
+    I: Iterator<Item = (usize, Strand)>,
+{
+    for (segment, strand) in steps {
+        let Some(&node) = graph.seg_to_node.get(&segment) else {
+            continue;
+        };
+        if node >= layout.num_nodes() {
+            continue;
+        }
+        let points = layout.pts(node);
+        if points.len() < 2 {
+            continue;
+        }
+        let screen_points: Vec<Pos2> = match strand {
+            Strand::Forward => points
+                .iter()
+                .map(|&point| world_to_screen(point, viewport, params))
+                .collect(),
+            Strand::Reverse => points
+                .iter()
+                .rev()
+                .map(|&point| world_to_screen(point, viewport, params))
+                .collect(),
+        };
+        let bbox = screen_points.iter().fold(Rect::NOTHING, |rect, point| {
+            rect.union(Rect::from_min_max(*point, *point))
+        });
+        if !viewport.intersects(bbox.expand(width + 3.0)) {
+            continue;
+        }
+
+        painter.add(egui::Shape::line(
+            screen_points.clone(),
+            Stroke::new(width, color.gamma_multiply(0.86)),
+        ));
+
+        if params.zoom > 0.2 && screen_points.len() >= 2 {
+            let tip = *screen_points.last().unwrap();
+            let penult = screen_points[screen_points.len() - 2];
+            draw_arrow_tip(painter, penult, tip, width * 1.15, color);
+        }
+    }
+}
+
+#[inline]
+fn oriented_entry(layout: &Layout, node: usize, strand: Strand) -> [f32; 2] {
+    match strand {
+        Strand::Forward => layout.start(node),
+        Strand::Reverse => layout.end(node),
+    }
+}
+
+#[inline]
+fn oriented_exit(layout: &Layout, node: usize, strand: Strand) -> [f32; 2] {
+    match strand {
+        Strand::Forward => layout.end(node),
+        Strand::Reverse => layout.start(node),
+    }
+}
+
+#[inline]
+fn world_to_screen(world: [f32; 2], viewport: Rect, params: &RenderParams) -> Pos2 {
+    Pos2::new(
+        world[0] * params.zoom + params.pan.x + viewport.center().x,
+        world[1] * params.zoom + params.pan.y + viewport.center().y,
+    )
+}
+
+fn draw_dashed_segment_pattern(
+    painter: &Painter,
+    start: Pos2,
+    end: Pos2,
+    stroke: Stroke,
+    dash: f32,
+    gap: f32,
+) {
+    let delta = end - start;
+    let length = delta.length();
+    if length <= f32::EPSILON {
+        return;
+    }
+    let direction = delta / length;
+    let mut offset = 0.0_f32;
+    while offset < length {
+        let dash_end = (offset + dash).min(length);
+        painter.line_segment(
+            [start + direction * offset, start + direction * dash_end],
+            stroke,
+        );
+        offset += dash + gap;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_overlay_legend(
+    painter: &Painter,
+    viewport: Rect,
+    gfa: &GfaGraph,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+    path_color: Color32,
+    walk_color: Color32,
+    containment_color: Color32,
+    params: &RenderParams,
+) {
+    let mut entries: Vec<(Color32, String)> = Vec::new();
+    if let Some(index) = selected_path {
+        if let Some(path) = gfa.paths.get(index) {
+            entries.push((path_color, format!("Path: {}", truncate_overlay_label(&path.name, 38))));
+        }
+    }
+    if let Some(index) = selected_walk {
+        if let Some(walk) = gfa.walks.get(index) {
+            entries.push((
+                walk_color,
+                format!(
+                    "Walk: {} / h{} / {}",
+                    truncate_overlay_label(&walk.sample_id, 18),
+                    walk.haplotype_index,
+                    truncate_overlay_label(&walk.sequence_id, 18)
+                ),
+            ));
+        }
+    }
+    if show_containments && !gfa.containments.is_empty() {
+        entries.push((
+            containment_color,
+            format!("Containments: {}", gfa.containments.len()),
+        ));
+    }
+    if entries.is_empty() {
+        return;
+    }
+
+    let line_height = 17.0_f32;
+    let origin = viewport.left_bottom()
+        + Vec2::new(10.0, -(10.0 + line_height * entries.len() as f32));
+    for (row, (color, label)) in entries.into_iter().enumerate() {
+        let y = origin.y + row as f32 * line_height;
+        painter.line_segment(
+            [Pos2::new(origin.x, y + 7.0), Pos2::new(origin.x + 18.0, y + 7.0)],
+            Stroke::new(3.0, color),
+        );
+        painter.text(
+            Pos2::new(origin.x + 25.0, y),
+            egui::Align2::LEFT_TOP,
+            label,
+            FontId::proportional(11.0),
+            params.canvas_foreground,
+        );
+    }
+}
+
+fn truncate_overlay_label(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
     }
 }
 
