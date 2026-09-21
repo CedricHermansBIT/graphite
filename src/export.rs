@@ -99,7 +99,52 @@ pub fn copy_sequence_to_clipboard(
 }
 
 /// Export the current graph view as a self-contained SVG figure.
-pub fn export_svg(path: &Path, graph: &ViewGraph, layout: &Layout, params: &RenderParams) -> Result<()> {
+///
+/// This base variant is used by the benchmark runner and intentionally omits
+/// interactive metadata overlays.
+pub fn export_svg(
+    path: &Path,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+) -> Result<()> {
+    export_svg_impl(path, None, graph, layout, params, None, None, false)
+}
+
+/// Export the current interactive view, including active GFA metadata overlays.
+pub fn export_svg_with_overlays(
+    path: &Path,
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) -> Result<()> {
+    export_svg_impl(
+        path,
+        Some(gfa),
+        graph,
+        layout,
+        params,
+        selected_path,
+        selected_walk,
+        show_containments,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_svg_impl(
+    path: &Path,
+    gfa: Option<&GfaGraph>,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) -> Result<()> {
     let figure = FigureTransform::new(layout, 2400.0, 1600.0)?;
     let mut output = String::new();
     output.push_str(&format!(
@@ -110,6 +155,7 @@ pub fn export_svg(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
         "<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>\n",
         svg_color(params.canvas_background, 255)
     ));
+
     for edge in &graph.edges {
         if edge.from >= layout.num_nodes() || edge.to >= layout.num_nodes() {
             continue;
@@ -132,6 +178,7 @@ pub fn export_svg(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
             a.0, a.1, b.0, b.1, svg_color(params.canvas_foreground, 255), params.edge_opacity
         ));
     }
+
     for (index, node) in graph.nodes.iter().enumerate() {
         if index >= layout.num_nodes() {
             continue;
@@ -139,13 +186,30 @@ pub fn export_svg(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
         let points = layout.pts(index);
         let color = color_for_node(node, params);
         output.push_str("<polyline fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"");
-        output.push_str(&format!(" stroke=\"{}\" stroke-width=\"5\" points=\"", svg_color(color, 255)));
+        output.push_str(&format!(
+            " stroke=\"{}\" stroke-width=\"5\" points=\"",
+            svg_color(color, 255)
+        ));
         for &point in points {
             let (x, y) = figure.point(point);
             output.push_str(&format!("{x:.2},{y:.2} "));
         }
         output.push_str("\"/>\n");
     }
+
+    if let Some(gfa) = gfa {
+        append_svg_overlays(
+            &mut output,
+            &figure,
+            gfa,
+            graph,
+            layout,
+            selected_path,
+            selected_walk,
+            show_containments,
+        );
+    }
+
     if params.show_labels && graph.nodes.len() <= 2_000 {
         for (index, node) in graph.nodes.iter().enumerate() {
             if index >= layout.num_nodes() {
@@ -165,7 +229,52 @@ pub fn export_svg(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
 }
 
 /// Export the current graph view as a PNG figure.
-pub fn export_png(path: &Path, graph: &ViewGraph, layout: &Layout, params: &RenderParams) -> Result<()> {
+///
+/// This base variant is used by the benchmark runner and omits interactive
+/// metadata overlays.
+pub fn export_png(
+    path: &Path,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+) -> Result<()> {
+    export_png_impl(path, None, graph, layout, params, None, None, false)
+}
+
+/// Export the current interactive view, including active GFA metadata overlays.
+pub fn export_png_with_overlays(
+    path: &Path,
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) -> Result<()> {
+    export_png_impl(
+        path,
+        Some(gfa),
+        graph,
+        layout,
+        params,
+        selected_path,
+        selected_walk,
+        show_containments,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_png_impl(
+    path: &Path,
+    gfa: Option<&GfaGraph>,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) -> Result<()> {
     let figure = FigureTransform::new(layout, 2400.0, 1600.0)?;
     let mut image = ImageBuffer::from_pixel(
         figure.width as u32,
@@ -178,6 +287,7 @@ pub fn export_png(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
         ]),
     );
     let edge_alpha = (params.edge_opacity * 255.0) as u8;
+
     for edge in &graph.edges {
         if edge.from >= layout.num_nodes() || edge.to >= layout.num_nodes() {
             continue;
@@ -191,11 +301,26 @@ pub fn export_png(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
             crate::gfa::Strand::Reverse => layout.end(edge.to),
         });
         if matches!(edge.kind, EdgeKind::Jump { .. }) {
-            draw_dashed_line(&mut image, a, b, params.canvas_foreground, edge_alpha, 1);
+            draw_dashed_line(
+                &mut image,
+                a,
+                b,
+                params.canvas_foreground,
+                edge_alpha,
+                1,
+            );
         } else {
-            draw_line(&mut image, a, b, params.canvas_foreground, edge_alpha, 1);
+            draw_line(
+                &mut image,
+                a,
+                b,
+                params.canvas_foreground,
+                edge_alpha,
+                1,
+            );
         }
     }
+
     for (index, node) in graph.nodes.iter().enumerate() {
         if index >= layout.num_nodes() {
             continue;
@@ -203,11 +328,348 @@ pub fn export_png(path: &Path, graph: &ViewGraph, layout: &Layout, params: &Rend
         let points = layout.pts(index);
         let color = color_for_node(node, params);
         for pair in points.windows(2) {
-            draw_line(&mut image, figure.point(pair[0]), figure.point(pair[1]), color, 255, 5);
+            draw_line(
+                &mut image,
+                figure.point(pair[0]),
+                figure.point(pair[1]),
+                color,
+                255,
+                5,
+            );
         }
     }
+
+    if let Some(gfa) = gfa {
+        draw_png_overlays(
+            &mut image,
+            &figure,
+            gfa,
+            graph,
+            layout,
+            selected_path,
+            selected_walk,
+            show_containments,
+        );
+    }
+
     image.save(path)?;
     Ok(())
+}
+
+fn append_svg_overlays(
+    output: &mut String,
+    figure: &FigureTransform,
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) {
+    const PATH: &str = "#f5aa37";
+    const WALK: &str = "#41cddc";
+    const CONTAINMENT: &str = "#be7deb";
+
+    if show_containments {
+        for containment in &gfa.containments {
+            let (Some(&container), Some(&contained)) = (
+                graph.seg_to_node.get(&containment.container),
+                graph.seg_to_node.get(&containment.contained),
+            ) else {
+                continue;
+            };
+            if container >= layout.num_nodes() || contained >= layout.num_nodes() {
+                continue;
+            }
+            let container_len = gfa
+                .segments
+                .get(containment.container)
+                .map_or(1, |segment| segment.length.max(1));
+            let fraction =
+                (containment.position as f32 / container_len as f32).clamp(0.0, 1.0);
+            let a = figure.point(layout.point_at_fraction(container, fraction));
+            let b = figure.point(oriented_entry(
+                layout,
+                contained,
+                containment.contained_strand,
+            ));
+            output.push_str(&format!(
+                "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{CONTAINMENT}\" stroke-width=\"2\" stroke-dasharray=\"2 5\"/>\n",
+                a.0, a.1, b.0, b.1
+            ));
+            output.push_str(&format!(
+                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"3\" fill=\"{CONTAINMENT}\"/>\n",
+                a.0, a.1
+            ));
+        }
+    }
+
+    if let Some(index) = selected_path {
+        if let Some(path) = gfa.paths.get(index) {
+            let steps = gfa.path_steps(path);
+            append_svg_step_polylines(output, figure, graph, layout, steps.iter().map(|s| (s.segment, s.strand)), PATH, 6.0);
+            for i in 0..steps.len().saturating_sub(1) {
+                let from = steps[i];
+                let to = steps[i + 1];
+                let (Some(&from_node), Some(&to_node)) = (
+                    graph.seg_to_node.get(&from.segment),
+                    graph.seg_to_node.get(&to.segment),
+                ) else {
+                    continue;
+                };
+                let a = figure.point(oriented_exit(layout, from_node, from.strand));
+                let b = figure.point(oriented_entry(layout, to_node, to.strand));
+                let dash = if matches!(
+                    from.connection_to_next,
+                    Some(crate::gfa::PathConnection::Jump)
+                ) {
+                    " stroke-dasharray=\"8 6\""
+                } else {
+                    ""
+                };
+                output.push_str(&format!(
+                    "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{PATH}\" stroke-width=\"4\"{dash}/>\n",
+                    a.0, a.1, b.0, b.1
+                ));
+            }
+        }
+    }
+
+    if let Some(index) = selected_walk {
+        if let Some(walk) = gfa.walks.get(index) {
+            let steps = gfa.walk_steps(walk);
+            append_svg_step_polylines(output, figure, graph, layout, steps.iter().map(|s| (s.segment, s.strand)), WALK, 5.0);
+            for pair in steps.windows(2) {
+                let (Some(&from_node), Some(&to_node)) = (
+                    graph.seg_to_node.get(&pair[0].segment),
+                    graph.seg_to_node.get(&pair[1].segment),
+                ) else {
+                    continue;
+                };
+                let a = figure.point(oriented_exit(layout, from_node, pair[0].strand));
+                let b = figure.point(oriented_entry(layout, to_node, pair[1].strand));
+                output.push_str(&format!(
+                    "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{WALK}\" stroke-width=\"3\"/>\n",
+                    a.0, a.1, b.0, b.1
+                ));
+            }
+        }
+    }
+}
+
+fn append_svg_step_polylines<I>(
+    output: &mut String,
+    figure: &FigureTransform,
+    graph: &ViewGraph,
+    layout: &Layout,
+    steps: I,
+    color: &str,
+    width: f32,
+) where
+    I: Iterator<Item = (usize, crate::gfa::Strand)>,
+{
+    for (segment, strand) in steps {
+        let Some(&node) = graph.seg_to_node.get(&segment) else {
+            continue;
+        };
+        if node >= layout.num_nodes() {
+            continue;
+        }
+        output.push_str(&format!(
+            "<polyline fill=\"none\" stroke=\"{color}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"{width:.1}\" points=\""
+        ));
+        match strand {
+            crate::gfa::Strand::Forward => {
+                for &point in layout.pts(node) {
+                    let (x, y) = figure.point(point);
+                    output.push_str(&format!("{x:.2},{y:.2} "));
+                }
+            }
+            crate::gfa::Strand::Reverse => {
+                for &point in layout.pts(node).iter().rev() {
+                    let (x, y) = figure.point(point);
+                    output.push_str(&format!("{x:.2},{y:.2} "));
+                }
+            }
+        }
+        output.push_str("\"/>\n");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_png_overlays(
+    image: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    figure: &FigureTransform,
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+) {
+    let path_color = Color32::from_rgb(245, 170, 55);
+    let walk_color = Color32::from_rgb(65, 205, 220);
+    let containment_color = Color32::from_rgb(190, 125, 235);
+
+    if show_containments {
+        for containment in &gfa.containments {
+            let (Some(&container), Some(&contained)) = (
+                graph.seg_to_node.get(&containment.container),
+                graph.seg_to_node.get(&containment.contained),
+            ) else {
+                continue;
+            };
+            if container >= layout.num_nodes() || contained >= layout.num_nodes() {
+                continue;
+            }
+            let container_len = gfa
+                .segments
+                .get(containment.container)
+                .map_or(1, |segment| segment.length.max(1));
+            let fraction =
+                (containment.position as f32 / container_len as f32).clamp(0.0, 1.0);
+            let a = figure.point(layout.point_at_fraction(container, fraction));
+            let b = figure.point(oriented_entry(
+                layout,
+                contained,
+                containment.contained_strand,
+            ));
+            draw_dashed_line(image, a, b, containment_color, 230, 2);
+        }
+    }
+
+    if let Some(index) = selected_path {
+        if let Some(path) = gfa.paths.get(index) {
+            let steps = gfa.path_steps(path);
+            draw_png_step_polylines(
+                image,
+                figure,
+                graph,
+                layout,
+                steps.iter().map(|s| (s.segment, s.strand)),
+                path_color,
+                6,
+            );
+            for i in 0..steps.len().saturating_sub(1) {
+                let from = steps[i];
+                let to = steps[i + 1];
+                let (Some(&from_node), Some(&to_node)) = (
+                    graph.seg_to_node.get(&from.segment),
+                    graph.seg_to_node.get(&to.segment),
+                ) else {
+                    continue;
+                };
+                let a = figure.point(oriented_exit(layout, from_node, from.strand));
+                let b = figure.point(oriented_entry(layout, to_node, to.strand));
+                if matches!(
+                    from.connection_to_next,
+                    Some(crate::gfa::PathConnection::Jump)
+                ) {
+                    draw_dashed_line(image, a, b, path_color, 240, 4);
+                } else {
+                    draw_line(image, a, b, path_color, 240, 4);
+                }
+            }
+        }
+    }
+
+    if let Some(index) = selected_walk {
+        if let Some(walk) = gfa.walks.get(index) {
+            let steps = gfa.walk_steps(walk);
+            draw_png_step_polylines(
+                image,
+                figure,
+                graph,
+                layout,
+                steps.iter().map(|s| (s.segment, s.strand)),
+                walk_color,
+                5,
+            );
+            for pair in steps.windows(2) {
+                let (Some(&from_node), Some(&to_node)) = (
+                    graph.seg_to_node.get(&pair[0].segment),
+                    graph.seg_to_node.get(&pair[1].segment),
+                ) else {
+                    continue;
+                };
+                let a = figure.point(oriented_exit(layout, from_node, pair[0].strand));
+                let b = figure.point(oriented_entry(layout, to_node, pair[1].strand));
+                draw_line(image, a, b, walk_color, 225, 3);
+            }
+        }
+    }
+}
+
+fn draw_png_step_polylines<I>(
+    image: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    figure: &FigureTransform,
+    graph: &ViewGraph,
+    layout: &Layout,
+    steps: I,
+    color: Color32,
+    thickness: i32,
+) where
+    I: Iterator<Item = (usize, crate::gfa::Strand)>,
+{
+    for (segment, strand) in steps {
+        let Some(&node) = graph.seg_to_node.get(&segment) else {
+            continue;
+        };
+        if node >= layout.num_nodes() {
+            continue;
+        }
+        let points = layout.pts(node);
+        match strand {
+            crate::gfa::Strand::Forward => {
+                for pair in points.windows(2) {
+                    draw_line(
+                        image,
+                        figure.point(pair[0]),
+                        figure.point(pair[1]),
+                        color,
+                        230,
+                        thickness,
+                    );
+                }
+            }
+            crate::gfa::Strand::Reverse => {
+                for pair in points.windows(2).rev() {
+                    draw_line(
+                        image,
+                        figure.point(pair[1]),
+                        figure.point(pair[0]),
+                        color,
+                        230,
+                        thickness,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+fn oriented_entry(
+    layout: &Layout,
+    node: usize,
+    strand: crate::gfa::Strand,
+) -> [f32; 2] {
+    match strand {
+        crate::gfa::Strand::Forward => layout.start(node),
+        crate::gfa::Strand::Reverse => layout.end(node),
+    }
+}
+
+#[inline]
+fn oriented_exit(
+    layout: &Layout,
+    node: usize,
+    strand: crate::gfa::Strand,
+) -> [f32; 2] {
+    match strand {
+        crate::gfa::Strand::Forward => layout.end(node),
+        crate::gfa::Strand::Reverse => layout.start(node),
+    }
 }
 
 struct FigureTransform {
