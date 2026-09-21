@@ -609,10 +609,16 @@ impl Layout {
             lengths.push(self.springs_desired[i]);
         }
 
+        let initial: Vec<Pos2> = samples.iter().map(|&pi| self.positions[pi]).collect();
         let mut output = vec![[0.0_f32; 2]; samples.len()];
-        if let Err(error) =
-            rust_layout::initial_layout(output.len(), &from, &to, &lengths, &mut output)
-        {
+        if let Err(error) = rust_layout::initial_layout(
+            output.len(),
+            &from,
+            &to,
+            &lengths,
+            &initial,
+            &mut output,
+        ) {
             log::warn!("Rust initial layout failed ({error}); using fallback placement");
             return false;
         }
