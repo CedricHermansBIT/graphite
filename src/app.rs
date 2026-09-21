@@ -10,7 +10,7 @@ use crate::export::{copy_sequence_to_clipboard, export_csv, AssemblyStats};
 use crate::filter::{ColorMode, FilterParams};
 use crate::gfa::GfaGraph;
 use crate::graph::ViewGraph;
-use crate::layout::{Layout, LayoutParams, LayoutRunner};
+use crate::layout::{Layout, LayoutBackend, LayoutParams, LayoutRunner};
 use crate::render::{draw_graph, hit_test_node, RenderParams};
 use crate::selection::Selection;
 use crate::ui::{
@@ -44,10 +44,14 @@ struct PreparedGraph {
 }
 
 impl PreparedGraph {
-    fn new(gfa: Arc<GfaGraph>, filter: &FilterParams) -> Self {
+    fn new(gfa: Arc<GfaGraph>, filter: &FilterParams, backend: LayoutBackend) -> Self {
         let stats = AssemblyStats::compute(&gfa);
         let view = ViewGraph::from_gfa(&gfa, filter);
-        let runner = LayoutRunner::start(Arc::new(view.rebuild_clone()), LayoutParams::default());
+        let runner = LayoutRunner::start_with_backend(
+            Arc::new(view.rebuild_clone()),
+            LayoutParams::default(),
+            backend,
+        );
         let snapshot = runner
             .snapshot()
             .expect("new layout mutex cannot be poisoned");
@@ -75,6 +79,7 @@ enum InteractionMode {
 
 pub struct GfaApp {
     load_state: LoadState,
+    layout_backend: LayoutBackend,
     filter: FilterParams,
     display: DisplayOptions,
     selection: Selection,
@@ -100,10 +105,15 @@ pub struct GfaApp {
 }
 
 impl GfaApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_file: Option<String>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial_file: Option<String>,
+        layout_backend: LayoutBackend,
+    ) -> Self {
         configure_style(&cc.egui_ctx, ThemePreset::Graphite);
         let mut app = Self {
             load_state: LoadState::Empty,
+            layout_backend,
             filter: FilterParams::default(),
             display: DisplayOptions::default(),
             selection: Selection::default(),
@@ -140,9 +150,10 @@ impl GfaApp {
         self.grab_world = None;
         self.pending_focus_nodes = None;
         let filter = self.filter.clone();
+        let backend = self.layout_backend;
         let handle = std::thread::spawn(move || {
             let gfa = Arc::new(crate::gfa::parse_gfa(&path)?);
-            Ok(PreparedGraph::new(gfa, &filter))
+            Ok(PreparedGraph::new(gfa, &filter, backend))
         });
         self.load_state = LoadState::Loading(handle);
     }
@@ -171,8 +182,9 @@ impl GfaApp {
                     }) => {
                         if filter != self.filter {
                             let filter = self.filter.clone();
+                            let backend = self.layout_backend;
                             self.load_state = LoadState::Loading(std::thread::spawn(move || {
-                                Ok(PreparedGraph::new(gfa, &filter))
+                                Ok(PreparedGraph::new(gfa, &filter, backend))
                             }));
                             return;
                         }
@@ -244,10 +256,11 @@ impl GfaApp {
         if let LoadState::Loaded { gfa, .. } = &self.load_state {
             let gfa = gfa.clone();
             let filter = self.filter.clone();
+            let backend = self.layout_backend;
             self.selection.clear();
-            self.status_msg = "Computing Bandage layout…".to_string();
+            self.status_msg = format!("Computing {} layout…", backend.as_str());
             self.load_state = LoadState::Loading(std::thread::spawn(move || {
-                Ok(PreparedGraph::new(gfa, &filter))
+                Ok(PreparedGraph::new(gfa, &filter, backend))
             }));
         }
     }
