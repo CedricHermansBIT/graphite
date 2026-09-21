@@ -35,12 +35,29 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def inspect_gfa(path: Path) -> dict[str, Any]:
-    segments = links = total_length = embedded = 0
+    segments = links = jumps = containments = paths = walks = 0
+    total_length = embedded = optional_tags = 0
+    gfa_version: str | None = None
+
     with path.open("rb") as handle:
         for raw in handle:
-            if raw.startswith(b"S\t"):
+            fields = raw.rstrip(b"\r\n").split(b"\t")
+            if not fields:
+                continue
+
+            optional_tags += sum(
+                1
+                for field in fields[1:]
+                if len(field) >= 5 and field[2:3] == b":" and field[4:5] == b":"
+            )
+
+            if raw.startswith(b"H\t"):
+                for field in fields[1:]:
+                    if field.startswith(b"VN:Z:"):
+                        gfa_version = field[5:].decode("ascii", errors="replace")
+                        break
+            elif raw.startswith(b"S\t"):
                 segments += 1
-                fields = raw.rstrip(b"\r\n").split(b"\t")
                 if len(fields) >= 3 and fields[2] != b"*":
                     embedded += 1
                     total_length += len(fields[2])
@@ -54,11 +71,26 @@ def inspect_gfa(path: Path) -> dict[str, Any]:
                             break
             elif raw.startswith(b"L\t"):
                 links += 1
+            elif raw.startswith(b"J\t"):
+                jumps += 1
+            elif raw.startswith(b"C\t"):
+                containments += 1
+            elif raw.startswith(b"P\t"):
+                paths += 1
+            elif raw.startswith(b"W\t"):
+                walks += 1
+
     return {
         "path": str(path.resolve()),
         "file_bytes": path.stat().st_size,
+        "gfa_version": gfa_version,
         "segments": segments,
         "links": links,
+        "jumps": jumps,
+        "containments": containments,
+        "paths": paths,
+        "walks": walks,
+        "optional_tags": optional_tags,
         "total_segment_length": total_length,
         "embedded_sequence_segments": embedded,
     }
