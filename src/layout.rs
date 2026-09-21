@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::gfa::Strand;
 use crate::graph::ViewGraph;
+use crate::rust_layout;
 
 pub type Pos2 = [f32; 2];
 
@@ -42,6 +43,29 @@ const SPRING_BEND: f32 = 0.45;
 const SPRING_LINK: f32 = 0.05;
 
 // ── Layout ───────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutBackend {
+    Bandage,
+    Rust,
+}
+
+impl LayoutBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "bandage" | "ogdf" => Some(Self::Bandage),
+            "rust" => Some(Self::Rust),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bandage => "bandage",
+            Self::Rust => "rust",
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Layout {
@@ -135,6 +159,10 @@ impl Layout {
     // ── Constructor ───────────────────────────────────────────────────────────
 
     pub fn new_with_graph(graph: &ViewGraph) -> Self {
+        Self::new_with_graph_backend(graph, LayoutBackend::Bandage)
+    }
+
+    pub fn new_with_graph_backend(graph: &ViewGraph, backend: LayoutBackend) -> Self {
         let n = graph.nodes.len();
         if n == 0 {
             return Self {
@@ -430,7 +458,10 @@ impl Layout {
             iteration: 0,
             converged: false,
         };
-        layout.converged = layout.seed_with_bandage(graph);
+        layout.converged = match backend {
+            LayoutBackend::Bandage => layout.seed_with_bandage(graph),
+            LayoutBackend::Rust => layout.seed_with_rust(graph),
+        };
         layout.pack_components();
         layout
     }
@@ -504,6 +535,93 @@ impl Layout {
             return false;
         }
         for range in ranges {
+            for i in range.start..range.end - 1 {
+                let a = samples[i];
+                let b = samples[i + 1];
+                for pi in a..=b {
+                    let t = (pi - a) as f32 / (b - a) as f32;
+                    self.positions[pi] = [
+                        output[i][0] * (1.0 - t) + output[i + 1][0] * t,
+                        output[i][1] * (1.0 - t) + output[i + 1][1] * t,
+                    ];
+                }
+            }
+        }
+        true
+    }
+
+    /// Use Graphite's Rust multilevel Barnes-Hut backend on the same reduced
+    /// representation passed to Bandage/OGDF.
+    fn seed_with_rust(&mut self, graph: &ViewGraph) -> bool {
+        if self.active_points.is_empty() {
+            return true;
+        }
+
+        let max_samples = if self.active_points.len() > 100_000 {
+            2
+        } else {
+            MAX_PTS
+        };
+        let mut indices = vec![u32::MAX; self.positions.len()];
+        let mut samples = Vec::new();
+        let mut ranges = Vec::new();
+        let mut from = Vec::new();
+        let mut to = Vec::new();
+        let mut lengths = Vec::new();
+
+        for v in 0..self.num_nodes() {
+            if self.fixed[self.comp_ids[v]] {
+                continue;
+            }
+            let count = self.node_pts_count[v];
+            let sample_count = count.min(max_samples);
+            let start = samples.len();
+            for j in 0..sample_count {
+                let chain_index = j * (count - 1) / (sample_count - 1);
+                let pi = self.node_pts_start[v] + chain_index;
+                let index = samples.len();
+                indices[pi] = index as u32;
+                if j > 0 {
+                    let previous = samples[index - 1];
+                    from.push((index - 1) as u32);
+                    to.push(index as u32);
+                    lengths.push(
+                        graph.nodes[v].visual_len * (pi - previous) as f32 / (count - 1) as f32,
+                    );
+                }
+                samples.push(pi);
+            }
+            ranges.push(start..samples.len());
+        }
+
+        for i in 0..self.springs_a.len() {
+            if self.springs_stiff[i] != SPRING_LINK {
+                continue;
+            }
+            let a = indices[self.springs_a[i] as usize];
+            let b = indices[self.springs_b[i] as usize];
+            if a == u32::MAX || b == u32::MAX {
+                log::warn!("Rust layout skipped an unresolved sampled spring endpoint");
+                continue;
+            }
+            from.push(a);
+            to.push(b);
+            lengths.push(self.springs_desired[i]);
+        }
+
+        let mut output = vec![[0.0_f32; 2]; samples.len()];
+        if let Err(error) =
+            rust_layout::initial_layout(output.len(), &from, &to, &lengths, &mut output)
+        {
+            log::warn!("Rust initial layout failed ({error}); using fallback placement");
+            return false;
+        }
+
+        for range in ranges {
+            if range.len() == 1 {
+                self.positions[samples[range.start]] = output[range.start];
+                continue;
+            }
             for i in range.start..range.end - 1 {
                 let a = samples[i];
                 let b = samples[i + 1];
@@ -880,7 +998,15 @@ pub struct LayoutRunner {
 
 impl LayoutRunner {
     pub fn start(graph: Arc<ViewGraph>, params: LayoutParams) -> Self {
-        let mut local = Layout::new_with_graph(&graph);
+        Self::start_with_backend(graph, params, LayoutBackend::Bandage)
+    }
+
+    pub fn start_with_backend(
+        graph: Arc<ViewGraph>,
+        params: LayoutParams,
+        backend: LayoutBackend,
+    ) -> Self {
+        let mut local = Layout::new_with_graph_backend(&graph, backend);
         let layout = Arc::new(Mutex::new(local.clone()));
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let attractor = Arc::new(Mutex::new(DragState::default()));
