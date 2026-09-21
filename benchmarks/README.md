@@ -5,7 +5,7 @@ This directory contains the reproducible benchmark harness for comparing Graphit
 The framework records two complementary measurements:
 
 1. **End-to-end process performance** for every tool: wall time, peak resident memory (RSS), CPU time, exit status, timeout status and output size.
-2. **Graphite stage timings** from its headless benchmark mode: GFA parsing, view-graph construction, initial layout, optional refinement and SVG export.
+2. **Graphite stage timings** from its headless benchmark mode: GFA parsing, view-graph construction, initial layout, optional refinement and optional SVG/PNG figure export.
 
 Use the end-to-end values for the main cross-tool comparison. Use Graphite's internal timings only to explain where its runtime is spent.
 
@@ -25,7 +25,7 @@ Graphite now has a headless benchmark mode:
   assembly.gfa
 ```
 
-It prints one JSON record to stdout and exits. `--benchmark-output` is optional. When present, SVG export is timed separately and included in total runtime.
+It prints one JSON record to stdout and exits. `--benchmark-output` is optional. Its extension selects the export format: `.svg` for vector output or `.png` for a 2400 × 1600 raster figure. Export time is reported separately and remains included in total runtime.
 
 For the main comparison, keep `--benchmark-steps 0`. The native FMMM initial placement is the layout used when a graph first becomes available. Extra Rust-side refinement is mainly relevant after interactive movement, so arbitrary refinement iterations would make a cross-tool comparison harder to interpret.
 
@@ -89,7 +89,7 @@ The example config automatically loads `benchmarks/data/manifest.json` through `
 Tool commands are arrays, not shell strings. Two placeholders are available:
 
 - `{input}`: absolute path to the GFA file
-- `{output}`: temporary SVG path for that run
+- `{output}`: temporary output path for that run; the current cross-tool configuration uses SVG
 
 The example assumes Bandage-compatible image commands. Adjust the executable names or CLI flags for the exact Bandage and Bandage-NG versions installed on the benchmark machine.
 
