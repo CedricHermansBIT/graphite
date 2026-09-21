@@ -1,9 +1,47 @@
 # Layout and interaction
 
+## Rust initial layout backend
+
+Graphite includes two initial-layout backends: the native Bandage/OGDF FMMM bridge and a Graphite-specific Rust implementation. Both are kept available for validation, benchmarking and reproducibility.
+
+Both backends receive the same reduced Graphite representation. For graphs above 100,000 active physics points, each contig is represented by its two endpoints and full visual length; intermediate render points are interpolated after layout. Circular components and isolated contigs bypass the general solver.
+
+The Rust backend now follows the important multilevel and force-scheduling ideas used by Bandage's bundled OGDF FMMM implementation, while replacing OGDF's New Multipole Method with a Rust Barnes-Hut implementation:
+
+- loop-free simple-graph preprocessing with parallel-edge length averaging;
+- deterministic solar-system coarsening with low-mass sun selection;
+- path-aware coarse edge lengths that include distances from fine nodes to their dedicated suns;
+- hierarchy mass used only for multilevel selection, not as force charge or inertia;
+- topology-aware coarse-to-fine placement using dedicated-sun distances and inter-solar lambda constraints with a 5% deterministic waggle;
+- exact repulsion for levels below 175 nodes and Barnes-Hut repulsion above that threshold;
+- unit-charge repulsive forces and Bandage/OGDF's `fmNew` attractive force shape;
+- coarse-heavy iteration scheduling, including at least 100 iterations for levels with 500 nodes or fewer;
+- force scaling based on current drawing size and oscillation damping;
+- Bandage-style postprocessing with rescaling and low-repulsion/high-spring fine tuning;
+- Bandage's simple split/merge untangling pass;
+- Rayon-parallel repulsive-force evaluation and independent connected-component solves;
+- Graphite's existing component packing after the solver completes.
+
+This is a clean Graphite-specific implementation of the algorithmic ideas, not a source translation of OGDF's FMMM/NMM code.
+
+For headless comparison:
+
+```bash
+./target/release/graphite --benchmark --layout-backend bandage graph.gfa
+./target/release/graphite --benchmark --layout-backend rust graph.gfa
+```
+
+The same selector works in the GUI:
+
+```bash
+./target/release/graphite --layout-backend bandage graph.gfa
+./target/release/graphite --layout-backend rust graph.gfa
+```
+
+The benchmark JSON includes `layout_backend`.
+
 Initial layout uses the actual OGDF FMMM implementation bundled in `Bandage/ogdf`.
-The native wrapper follows `Bandage/program/graphlayoutworker.cpp` at quality 1:
-12 fixed iterations, 8 fine-tuning iterations, multipole precision 2, and 50
-component rotation steps. A fixed random seed makes repeated loads reproducible.
+The native wrapper follows `Bandage/program/graphlayoutworker.cpp` with Graphite-specific speed settings: normally 12 fixed iterations and 8 fine-tuning iterations, reduced to 3 and 1 respectively when the native layout receives more than 50,000 nodes; multipole precision is 2 and component rotation uses 50 steps. A fixed random seed makes repeated loads reproducible.
 Contigs are represented by chains of points connected at their strand-correct
 endpoints, as in `Bandage/graph/debruijnnode.cpp` and `debruijnedge.cpp`.
 For graphs above 100,000 active physics points, FMMM receives the two contig
@@ -35,6 +73,17 @@ and rings have no simulation springs. Position updates reuse buffers rather than
 cloning all springs and topology. Dense near-field cells can still incur
 quadratic work. Overview rendering culls offscreen edges, merges indistinguishable
 dots, and draws visible contigs as single polylines.
+
+## Remote UI mode
+
+For X11 forwarding over SSH, use `--remote-ui` to reduce continuous layout traffic without slowing the layout solver itself:
+
+```bash
+ssh -YC server
+./target/release/graphite --remote-ui --layout-backend rust graph.gfa
+```
+
+Normal mode publishes layout snapshots and requests animation repaints about every 16 ms. Remote UI mode changes both cadences to 100 ms (about 10 Hz). Pointer, keyboard and other egui input events can still trigger immediate frames, so the throttle mainly affects continuous background layout animation and the large position-buffer copies associated with it. Once the graph is settled the UI remains event-driven in either mode.
 
 ## Building
 

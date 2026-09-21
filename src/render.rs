@@ -429,8 +429,8 @@ mod tests {
 
     fn paint(graph: &ViewGraph, layout: &Layout, zoom: f32) -> egui::FullOutput {
         let ctx = egui::Context::default();
-        ctx.run(egui::RawInput::default(), |ctx| {
-            let painter = ctx.layer_painter(egui::LayerId::new(
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("test"),
             ));
@@ -445,7 +445,12 @@ mod tests {
                     ..Default::default()
                 },
             );
-        })
+        });
+
+        // egui 0.36 requires texture deltas (typically the test font atlas)
+        // to be consumed or explicitly cleared before FullOutput is dropped.
+        output.textures_delta.clear();
+        output
     }
 
     #[test]
