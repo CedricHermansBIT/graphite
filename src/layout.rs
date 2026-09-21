@@ -42,6 +42,11 @@ const SPRING_BEND: f32 = 0.45;
 /// Stiffness for graph-link springs — deliberately weak so repulsion can compete.
 const SPRING_LINK: f32 = 0.05;
 
+/// Graph-link springs are softened while a contig is actively grabbed so
+/// neighbouring contigs follow with some give instead of feeling rigidly tied
+/// to the cursor. Full stiffness returns immediately after release.
+const DRAG_LINK_SPRING_SCALE: f32 = 0.35;
+
 // ── Layout ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -887,7 +892,10 @@ impl Layout {
                 continue;
             }
             let desired = self.springs_desired[i];
-            let stiff = self.springs_stiff[i];
+            let mut stiff = self.springs_stiff[i];
+            if attractor.is_some() && stiff == SPRING_LINK {
+                stiff *= DRAG_LINK_SPRING_SCALE;
+            }
             let dx = self.positions[pj][0] - self.positions[pi][0];
             let dy = self.positions[pj][1] - self.positions[pi][1];
             let dist = (dx * dx + dy * dy).sqrt().max(0.001);
