@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 use crate::gfa::Strand;
-use crate::graph::ViewGraph;
+use crate::graph::{EdgeKind, ViewGraph};
 use crate::rust_layout;
 
 pub type Pos2 = [f32; 2];
@@ -431,7 +431,14 @@ impl Layout {
                 Strand::Forward => node_pts_start[v],
                 Strand::Reverse => node_pts_start[v] + node_pts_count[v] - 1,
             };
-            push_spring(pu, pv, graph_edge_desired, SPRING_LINK);
+            let desired = match edge.kind {
+                EdgeKind::Jump {
+                    distance: Some(distance),
+                    ..
+                } if distance > 0 => graph_edge_desired + distance as f32 * 0.1,
+                _ => graph_edge_desired,
+            };
+            push_spring(pu, pv, desired, SPRING_LINK);
         }
 
         let disp = vec![[0.0_f32; 2]; total_pts];
@@ -1116,7 +1123,7 @@ impl Drop for LayoutRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EdgeInfo, EdgeKind, NodeInfo};
+    use crate::graph::{EdgeInfo, NodeInfo};
 
     fn graph(lengths: &[f32], links: &[(usize, Strand, usize, Strand)]) -> ViewGraph {
         ViewGraph {
