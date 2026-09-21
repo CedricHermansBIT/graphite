@@ -291,12 +291,12 @@ pub fn draw_gfa_overlays(
     selected_walk: Option<usize>,
     show_containments: bool,
 ) {
-    const PATH_COLOR: Color32 = Color32::from_rgb(245, 170, 55);
-    const WALK_COLOR: Color32 = Color32::from_rgb(65, 205, 220);
-    const CONTAINMENT_COLOR: Color32 = Color32::from_rgb(190, 125, 235);
+    let path_color = Color32::from_rgb(245, 170, 55);
+    let walk_color = Color32::from_rgb(65, 205, 220);
+    let containment_color = Color32::from_rgb(190, 125, 235);
 
     if show_containments {
-        let stroke = Stroke::new(1.5, CONTAINMENT_COLOR.gamma_multiply(0.85));
+        let stroke = Stroke::new(1.5, containment_color.gamma_multiply(0.85));
         for containment in &gfa.containments {
             let Some(&container_node) = graph.seg_to_node.get(&containment.container) else {
                 continue;
@@ -332,7 +332,7 @@ pub fn draw_gfa_overlays(
             }
 
             draw_dashed_segment_pattern(painter, source, target, stroke, 2.0, 4.0);
-            painter.circle_filled(source, 2.5, CONTAINMENT_COLOR);
+            painter.circle_filled(source, 2.5, containment_color);
         }
     }
 
@@ -346,7 +346,7 @@ pub fn draw_gfa_overlays(
                 layout,
                 params,
                 steps.iter().map(|step| (step.segment, step.strand)),
-                PATH_COLOR,
+                path_color,
                 5.0,
             );
 
@@ -372,7 +372,7 @@ pub fn draw_gfa_overlays(
                     viewport,
                     params,
                 );
-                let stroke = Stroke::new(3.0, PATH_COLOR.gamma_multiply(0.9));
+                let stroke = Stroke::new(3.0, path_color.gamma_multiply(0.9));
                 if matches!(from.connection_to_next, Some(PathConnection::Jump)) {
                     draw_dashed_segment(painter, a, b, stroke);
                 } else {
@@ -392,7 +392,7 @@ pub fn draw_gfa_overlays(
                 layout,
                 params,
                 steps.iter().map(|step| (step.segment, step.strand)),
-                WALK_COLOR,
+                walk_color,
                 4.0,
             );
 
@@ -420,7 +420,7 @@ pub fn draw_gfa_overlays(
                 );
                 painter.line_segment(
                     [a, b],
-                    Stroke::new(2.5, WALK_COLOR.gamma_multiply(0.85)),
+                    Stroke::new(2.5, walk_color.gamma_multiply(0.85)),
                 );
             }
         }
@@ -433,9 +433,9 @@ pub fn draw_gfa_overlays(
         selected_path,
         selected_walk,
         show_containments,
-        PATH_COLOR,
-        WALK_COLOR,
-        CONTAINMENT_COLOR,
+        path_color,
+        walk_color,
+        containment_color,
         params,
     );
 }
@@ -474,9 +474,15 @@ fn draw_path_like_overlay<I>(
                 .map(|&point| world_to_screen(point, viewport, params))
                 .collect(),
         };
-        let bbox = screen_points.iter().fold(Rect::NOTHING, |rect, point| {
-            rect.union(Rect::from_min_max(*point, *point))
-        });
+        let mut min = screen_points[0];
+        let mut max = screen_points[0];
+        for point in &screen_points[1..] {
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+        }
+        let bbox = Rect::from_min_max(min, max);
         if !viewport.intersects(bbox.expand(width + 3.0)) {
             continue;
         }
