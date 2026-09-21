@@ -4,14 +4,15 @@
   <img src="assets/graphite-icon.png" width="128" alt="Graphite graph icon">
 </p>
 
-Graphite is a fast desktop viewer for large assembly graphs. Its name reflects a graph structure and its dark, precise technical aesthetic. It retains the familiar initial placement of Bandage while remaining responsive with large GFA files. The parser memory-maps input, layouts run away from the UI thread, and rendering uses level-of-detail so navigation remains practical as assemblies grow.
+Graphite is a fast desktop viewer for large assembly graphs. It is designed around memory-mapped parsing, compact graph structures, asynchronous layout and level-of-detail rendering so navigation remains practical as assemblies grow.
 
-The project uses the bundled Bandage OGDF/FMMM code for initial placement of connected, non-circular components. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
+Graphite includes two initial-layout backends for connected, non-circular components: a Graphite-specific multilevel Rust implementation and the bundled Bandage/OGDF FMMM implementation used as a reference backend. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
 
 ## Highlights
 
 - Memory-mapped, byte-level GFA parsing that does not copy embedded sequences until needed.
-- Bandage-inspired initial layout, asynchronous refinement, pan, zoom, rubber-band selection, and direct contig dragging.
+- Scalable Rust multilevel layout with Barnes-Hut repulsion, plus a Bandage/OGDF reference backend for comparison.
+- Asynchronous refinement, pan, zoom, rubber-band selection, and direct contig dragging.
 - Circular, linear, and branched component classification.
 - Filters for segment name, length, depth/coverage, topology, and minimum/maximum segments per component.
 - Component sorting by length, segment count, coverage, or read count, with ascending/descending order and a top-N limit.
@@ -42,6 +43,19 @@ cargo build --release
 
 The file argument is optional: without it, use **File → Open GFA…**.
 
+Select the layout backend explicitly when comparing implementations:
+
+```bash
+./target/release/graphite --layout-backend rust path/to/assembly.gfa
+./target/release/graphite --layout-backend bandage path/to/assembly.gfa
+```
+
+For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and repaint traffic:
+
+```bash
+./target/release/graphite --remote-ui --layout-backend rust path/to/assembly.gfa
+```
+
 To create the Windows release executable from Linux/WSL:
 
 ```bash
@@ -50,6 +64,33 @@ cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
 `build.rs` supplies an `llvm-lib` compatibility wrapper for `cargo-xwin`, so a separately installed `llvm-lib` is not required.
+
+## Benchmarking
+
+The benchmark framework is part of the main repository under `benchmarks/`. It supports synthetic dataset generation, Graphite/Bandage/BandageNG command configuration, publication-mode serial runs, exploratory parallel runs, JSONL/CSV output, summary statistics, and SVG scaling plots.
+
+Generate the default synthetic datasets:
+
+```bash
+python3 benchmarks/generate_synthetic.py
+```
+
+Run a serial publication benchmark:
+
+```bash
+python3 benchmarks/run_benchmarks.py benchmarks/config.local.json --mode publication
+```
+
+For development, individual tools and datasets can be selected, for example:
+
+```bash
+python3 benchmarks/run_benchmarks.py benchmarks/config.local.json \
+  --mode exploratory --jobs 4 \
+  --tool graphite-rust \
+  --output benchmarks/results-rust
+```
+
+See `benchmarks/README.md` for the complete benchmark workflow.
 
 ## Navigation and selection
 
@@ -97,7 +138,8 @@ src/
   app.rs        application state, interaction, panels, minimap
   gfa.rs        memory-mapped GFA parser and metadata extraction
   graph.rs      filtered graph and component summaries
-  layout.rs     Bandage FMMM initialization and background layout refinement
+  layout.rs     layout representation, backend dispatch and background refinement
+  rust_layout.rs Rust multilevel/Barnes-Hut initial layout backend
   render.rs     canvas rendering, colours, hit testing
   filter.rs     filtering and sorting parameters
   selection.rs  selection and rubber-band logic
@@ -106,7 +148,9 @@ src/
 native/
   bandage_layout.cpp  bridge to bundled Bandage OGDF layout code
 Bandage/
-  bundled Bandage and OGDF source used by the initial layout
+  bundled Bandage and OGDF source used by the reference layout backend
+benchmarks/
+  benchmark runner, synthetic datasets, summaries and plotting utilities
 assets/
   graphite-icon.png  application and README icon
   graphite-icon.ico  multi-resolution Windows icon
