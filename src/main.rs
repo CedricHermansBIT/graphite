@@ -30,8 +30,8 @@ struct Args {
     #[argh(option)]
     benchmark_output: Option<String>,
 
-    /// initial layout backend: bandage or rust
-    #[argh(option, default = "String::from(\"bandage\")")]
+    /// initial layout backend: rust or bandage
+    #[argh(option, default = "String::from(\"rust\")")]
     layout_backend: String,
 
     /// reduce continuous UI updates for SSH/X11 forwarding
