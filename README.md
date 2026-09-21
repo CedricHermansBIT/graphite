@@ -6,7 +6,7 @@
 
 Graphite is a fast desktop viewer for large assembly graphs. It is designed around memory-mapped parsing, compact graph structures, asynchronous layout and level-of-detail rendering so navigation remains practical as assemblies grow.
 
-Graphite includes two initial-layout backends for connected, non-circular components: a Graphite-specific multilevel Rust implementation and the bundled Bandage/OGDF FMMM implementation used as a reference backend. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
+Graphite uses its Graphite-specific multilevel Rust implementation as the default initial-layout backend for connected, non-circular components. The bundled Bandage/OGDF FMMM implementation remains available as a reference backend for validation and benchmarking. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
 
 ## Highlights
 
@@ -43,7 +43,7 @@ cargo build --release
 
 The file argument is optional: without it, use **File → Open GFA…**.
 
-Select the layout backend explicitly when comparing implementations:
+The Rust backend is the default. Select a backend explicitly when comparing implementations:
 
 ```bash
 ./target/release/graphite --layout-backend rust path/to/assembly.gfa
