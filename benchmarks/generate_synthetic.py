@@ -44,9 +44,8 @@ def segment_line(
     if extra_tags:
         # Exercise standard GFA1 tags plus one unknown tag that should be
         # retained by Graphite's generic zero-copy tag table.
-        checksum = hashlib.sha256(
-            (sequence if sequence is not None else name(index)).encode("ascii")
-        ).hexdigest()
+        checksum_source = sequence if sequence is not None else deterministic_sequence(segment_length)
+        checksum = hashlib.sha256(checksum_source.encode("ascii")).hexdigest()
         fields.extend(
             [
                 f"FC:i:{5 + index % 29}",
@@ -80,7 +79,7 @@ def link_line(left: int, right: int, extra_tags: bool = False, edge_id: int = 0)
 
 
 def jump_line(left: int, right: int, jump_id: int, shortcut: bool = False) -> tuple[str, int]:
-    distance = 100 + (jump_id % 2000)
+    distance = 100
     fields = ["J", name(left), "+", name(right), "+", str(distance)]
     tag_count = 0
     if shortcut:
