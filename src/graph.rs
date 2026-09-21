@@ -21,6 +21,15 @@ pub struct NodeInfo {
     pub visual_len: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    Link,
+    Jump {
+        distance: Option<i64>,
+        shortcut: bool,
+    },
+}
+
 /// Per-edge display data.
 #[derive(Debug, Clone, Copy)]
 pub struct EdgeInfo {
@@ -28,6 +37,7 @@ pub struct EdgeInfo {
     pub from_strand: Strand,
     pub to: usize, // node index
     pub to_strand: Strand,
+    pub kind: EdgeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,21 +117,34 @@ impl ViewGraph {
             .map(|(ni, node)| (node.seg_idx, ni))
             .collect();
 
-        // --- Filter edges (only keep edges where both endpoints are present) ---
-        let edges: Vec<EdgeInfo> = gfa
-            .links
-            .iter()
-            .filter_map(|lnk| {
-                let from = *seg_to_node.get(&lnk.from)?;
-                let to = *seg_to_node.get(&lnk.to)?;
-                Some(EdgeInfo {
-                    from,
-                    from_strand: lnk.from_strand,
-                    to,
-                    to_strand: lnk.to_strand,
-                })
+        // --- Filter connections (only keep endpoints that are present) ---
+        let mut edges: Vec<EdgeInfo> =
+            Vec::with_capacity(gfa.links.len().saturating_add(gfa.jumps.len()));
+        edges.extend(gfa.links.iter().filter_map(|link| {
+            let from = *seg_to_node.get(&link.from)?;
+            let to = *seg_to_node.get(&link.to)?;
+            Some(EdgeInfo {
+                from,
+                from_strand: link.from_strand,
+                to,
+                to_strand: link.to_strand,
+                kind: EdgeKind::Link,
             })
-            .collect();
+        }));
+        edges.extend(gfa.jumps.iter().filter_map(|jump| {
+            let from = *seg_to_node.get(&jump.from)?;
+            let to = *seg_to_node.get(&jump.to)?;
+            Some(EdgeInfo {
+                from,
+                from_strand: jump.from_strand,
+                to,
+                to_strand: jump.to_strand,
+                kind: EdgeKind::Jump {
+                    distance: jump.distance,
+                    shortcut: jump.shortcut,
+                },
+            })
+        }));
 
         let components = build_component_summaries(&nodes, &edges);
 
@@ -283,6 +306,11 @@ fn component_selection(
             dsu.union(link.from, link.to);
         }
     }
+    for jump in &gfa.jumps {
+        if candidate[jump.from] && candidate[jump.to] {
+            dsu.union(jump.from, jump.to);
+        }
+    }
 
     let mut sizes = vec![0usize; n];
     let mut total_lengths = vec![0u128; n];
@@ -308,12 +336,21 @@ fn component_selection(
     // duplicate GFA links must not turn a simple path or ring into a branch.
     let mut endpoint_degree = vec![0u8; n.saturating_mul(2)];
     let mut endpoint_links = AHashSet::default();
-    for link in &gfa.links {
-        if !candidate[link.from] || !candidate[link.to] {
+    for (from_segment, from_strand, to_segment, to_strand) in gfa
+        .links
+        .iter()
+        .map(|link| (link.from, link.from_strand, link.to, link.to_strand))
+        .chain(
+            gfa.jumps
+                .iter()
+                .map(|jump| (jump.from, jump.from_strand, jump.to, jump.to_strand)),
+        )
+    {
+        if !candidate[from_segment] || !candidate[to_segment] {
             continue;
         }
-        let from = 2 * link.from + usize::from(matches!(link.from_strand, Strand::Forward));
-        let to = 2 * link.to + usize::from(matches!(link.to_strand, Strand::Reverse));
+        let from = 2 * from_segment + usize::from(matches!(from_strand, Strand::Forward));
+        let to = 2 * to_segment + usize::from(matches!(to_strand, Strand::Reverse));
         let edge = if from <= to { (from, to) } else { (to, from) };
         if endpoint_links.insert(edge) {
             endpoint_degree[from] = endpoint_degree[from].saturating_add(1);
@@ -463,7 +500,7 @@ fn visual_length(bp: usize) -> f32 {
 mod tests {
     use super::*;
     use crate::filter::{ComponentSort, ComponentSortOrder, ComponentTopology};
-    use crate::gfa::{Link, Segment};
+    use crate::gfa::{GfaVersion, Link, Segment};
     use memmap2::MmapMut;
     use std::ops::Range;
 
@@ -479,6 +516,7 @@ mod tests {
                 length: lengths[i],
                 depth: depths[i],
                 read_count: read_counts[i],
+                tag_range: 0..0,
             })
             .collect();
         let link = |from, from_strand, to, to_strand| Link {
@@ -487,10 +525,13 @@ mod tests {
             to,
             to_strand,
             overlap_range: Range { start: 0, end: 0 },
+            tag_range: 0..0,
         };
         use Strand::{Forward as F, Reverse as R};
         GfaGraph {
             mmap: MmapMut::map_anon(1).unwrap().make_read_only().unwrap(),
+            version: GfaVersion::Unspecified,
+            headers: Vec::new(),
             segments,
             sequence_segment_count: 0,
             links: vec![
@@ -500,6 +541,13 @@ mod tests {
                 link(3, F, 5, F),
                 link(2, R, 1, R), // reciprocal duplicate of the path link
             ],
+            jumps: Vec::new(),
+            containments: Vec::new(),
+            paths: Vec::new(),
+            path_steps: Vec::new(),
+            walks: Vec::new(),
+            walk_steps: Vec::new(),
+            tags: Vec::new(),
             name_index: Default::default(),
         }
     }
