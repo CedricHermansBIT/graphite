@@ -67,7 +67,7 @@ python3 benchmarks/generate_synthetic.py benchmarks/data-features \
   --feature-cases tags jumps mixed
 ```
 
-Synthetic graphs characterize scaling and parser behavior. They should not replace real biological assemblies in the paper.
+Synthetic graphs characterize scaling and parser behavior. They should not replace real biological assemblies in the paper. Use the original `S`/`L` topology suite for the clean cross-tool scaling comparison; the feature cases are primarily Graphite parser/regression benchmarks because support for GFA1.1/1.2 records differs between external viewer versions.
 
 To stress parser and file-memory behavior with embedded sequence:
 
