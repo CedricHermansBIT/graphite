@@ -35,6 +35,7 @@ impl Strand {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_char(self) -> char {
         match self {
             Self::Forward => '+',
