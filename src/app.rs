@@ -16,7 +16,7 @@ use crate::render::{draw_gfa_overlays, draw_graph, hit_test_node, RenderParams};
 use crate::selection::Selection;
 use crate::ui::{
     component_table, display_panel, filter_panel, overlays_panel, selection_panel, stats_panel,
-    DisplayOptions, OverlayOptions, ThemePreset,
+    DisplayOptions, OverlayAction, OverlayOptions, ThemePreset,
 };
 
 // ── Load state machine ────────────────────────────────────────────────────────
@@ -580,16 +580,24 @@ impl GfaApp {
                         ui.separator();
                     }
                     if self.show_overlay_panel {
+                        let mut overlay_action = None;
                         if let LoadState::Loaded { gfa, .. } = &self.load_state {
                             if !gfa.paths.is_empty()
                                 || !gfa.walks.is_empty()
                                 || !gfa.containments.is_empty()
                             {
-                                if overlays_panel(ui, gfa, &mut self.overlays) {
+                                let (changed, action) =
+                                    overlays_panel(ui, gfa, &mut self.overlays);
+                                if changed {
                                     ctx.request_repaint();
                                 }
+                                overlay_action = action;
                                 ui.separator();
                             }
+                        }
+                        if let Some(action) = overlay_action {
+                            self.apply_overlay_action(action);
+                            ctx.request_repaint();
                         }
                     }
                     if self.show_stats_panel {
@@ -671,6 +679,83 @@ impl GfaApp {
             self.selection.nodes.extend(nodes.iter().copied());
             self.pending_focus_nodes = Some(nodes);
             self.status_msg = format!("Focused {}-segment component.", self.selection.node_count());
+        }
+    }
+
+    fn apply_overlay_action(&mut self, action: OverlayAction) {
+        let (nodes, total_steps, label) = match (&self.load_state, action) {
+            (
+                LoadState::Loaded { gfa, view, .. },
+                OverlayAction::FocusPath(index) | OverlayAction::SelectPath(index),
+            ) => {
+                let Some(path) = gfa.paths.get(index) else {
+                    return;
+                };
+                let mut nodes: Vec<usize> = gfa
+                    .path_steps(path)
+                    .iter()
+                    .filter_map(|step| view.seg_to_node.get(&step.segment).copied())
+                    .collect();
+                nodes.sort_unstable();
+                nodes.dedup();
+                (nodes, path.steps.len(), format!("path {}", path.name))
+            }
+            (
+                LoadState::Loaded { gfa, view, .. },
+                OverlayAction::FocusWalk(index) | OverlayAction::SelectWalk(index),
+            ) => {
+                let Some(walk) = gfa.walks.get(index) else {
+                    return;
+                };
+                let mut nodes: Vec<usize> = gfa
+                    .walk_steps(walk)
+                    .iter()
+                    .filter_map(|step| view.seg_to_node.get(&step.segment).copied())
+                    .collect();
+                nodes.sort_unstable();
+                nodes.dedup();
+                (
+                    nodes,
+                    walk.steps.len(),
+                    format!(
+                        "walk {} / h{} / {}",
+                        walk.sample_id, walk.haplotype_index, walk.sequence_id
+                    ),
+                )
+            }
+            _ => return,
+        };
+
+        if nodes.is_empty() {
+            self.status_msg = format!(
+                "No visible segments from {label}; the current filters hide all {} steps.",
+                total_steps
+            );
+            return;
+        }
+
+        match action {
+            OverlayAction::FocusPath(_) | OverlayAction::FocusWalk(_) => {
+                self.pending_focus_nodes = Some(nodes.clone());
+                self.status_msg = format!(
+                    "Focused {label}: {} visible segment{} from {} step{}.",
+                    nodes.len(),
+                    if nodes.len() == 1 { "" } else { "s" },
+                    total_steps,
+                    if total_steps == 1 { "" } else { "s" },
+                );
+            }
+            OverlayAction::SelectPath(_) | OverlayAction::SelectWalk(_) => {
+                self.selection.clear();
+                self.selection.nodes.extend(nodes.iter().copied());
+                self.status_msg = format!(
+                    "Selected {} visible segment{} from {label} ({} step{}).",
+                    nodes.len(),
+                    if nodes.len() == 1 { "" } else { "s" },
+                    total_steps,
+                    if total_steps == 1 { "" } else { "s" },
+                );
+            }
         }
     }
 
