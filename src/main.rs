@@ -26,7 +26,7 @@ struct Args {
     #[argh(option, default = "0")]
     benchmark_steps: usize,
 
-    /// optional SVG path to include figure export in benchmark mode
+    /// optional .svg or .png path to include figure export in benchmark mode
     #[argh(option)]
     benchmark_output: Option<String>,
 
@@ -74,12 +74,30 @@ fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout
 
     let export_ms = if let Some(output) = output {
         let start = Instant::now();
-        export::export_svg(
-            std::path::Path::new(output),
-            &view,
-            &layout,
-            &render::RenderParams::default(),
-        )?;
+        let output_path = std::path::Path::new(output);
+        let extension = output_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .context("benchmark output path must end in .svg or .png")?;
+
+        match extension.as_str() {
+            "svg" => export::export_svg(
+                output_path,
+                &view,
+                &layout,
+                &render::RenderParams::default(),
+            )?,
+            "png" => export::export_png(
+                output_path,
+                &view,
+                &layout,
+                &render::RenderParams::default(),
+            )?,
+            _ => anyhow::bail!(
+                "unsupported benchmark output format '.{extension}'; expected .svg or .png"
+            ),
+        }
         Some(milliseconds(start))
     } else {
         None
@@ -131,6 +149,12 @@ fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout
         "initial_layout_ms": initial_layout_ms,
         "refinement_ms": refinement_ms,
         "export_ms": export_ms,
+        "export_format": output.and_then(|path| {
+            std::path::Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(str::to_ascii_lowercase)
+        }),
         "total_ms": milliseconds(total_start)
     });
     println!("{}", serde_json::to_string(&report)?);
