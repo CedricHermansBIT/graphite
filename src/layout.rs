@@ -1008,6 +1008,7 @@ impl LayoutRunner {
         graph: Arc<ViewGraph>,
         params: LayoutParams,
         backend: LayoutBackend,
+        publish_interval: std::time::Duration,
     ) -> Self {
         let mut local = Layout::new_with_graph_backend(&graph, backend);
         let layout = Arc::new(Mutex::new(local.clone()));
@@ -1043,7 +1044,7 @@ impl LayoutRunner {
                     local.converged = false;
                 }
                 local.step(&graph, &params, att);
-                if published.elapsed() >= std::time::Duration::from_millis(16) || local.converged {
+                if published.elapsed() >= publish_interval || local.converged {
                     if let Ok(mut shared) = layout2.lock() {
                         shared.positions.clone_from(&local.positions);
                         shared.revision = local.revision;
