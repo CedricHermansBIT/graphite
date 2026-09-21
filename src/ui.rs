@@ -462,7 +462,7 @@ pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) ->
                 .iter()
                 .enumerate()
                 .filter(|(_, path)| {
-                    query.is_empty() || path.name.to_ascii_lowercase().contains(&query)
+                    query.is_empty() || path.name.as_ref().to_ascii_lowercase().contains(&query)
                 })
                 .take(20)
                 .collect();
@@ -472,7 +472,7 @@ pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) ->
                     if ui
                         .selectable_label(
                             opts.selected_path == Some(index),
-                            format!("{}  ·  {} steps", path.name, path.steps.len()),
+                            format!("{}  ·  {} steps", path.name.as_ref(), path.steps.len()),
                         )
                         .clicked()
                     {
@@ -515,8 +515,8 @@ pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) ->
                     if query.is_empty() {
                         true
                     } else {
-                        walk.sample_id.to_ascii_lowercase().contains(&query)
-                            || walk.sequence_id.to_ascii_lowercase().contains(&query)
+                        walk.sample_id.as_ref().to_ascii_lowercase().contains(&query)
+                            || walk.sequence_id.as_ref().to_ascii_lowercase().contains(&query)
                             || walk.haplotype_index.to_string().contains(&query)
                     }
                 })
@@ -551,7 +551,10 @@ fn walk_label(walk: &crate::gfa::Walk) -> String {
     };
     format!(
         "{} · h{} · {}{}",
-        walk.sample_id, walk.haplotype_index, walk.sequence_id, coordinates
+        walk.sample_id.as_ref(),
+        walk.haplotype_index,
+        walk.sequence_id.as_ref(),
+        coordinates
     )
 }
 
