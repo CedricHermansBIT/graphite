@@ -3,6 +3,15 @@
   "warmups": 1,
   "timeout_seconds": 900,
   "sample_interval_ms": 50,
+  "adaptive_repetitions": {
+    "enabled": true,
+    "pilot_repetitions": 2,
+    "fast_seconds": 10,
+    "slow_seconds": 60,
+    "fast_repetitions": 5,
+    "medium_repetitions": 3,
+    "slow_repetitions": 2
+  },
   "tools": [
     {
       "name": "graphite",
@@ -15,7 +24,10 @@
         "{output}",
         "{input}"
       ],
-      "parse_json": true
+      "parse_json": true,
+      "env": {
+        "RAYON_NUM_THREADS": "8"
+      }
     },
     {
       "name": "bandage",
