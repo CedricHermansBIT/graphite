@@ -9,6 +9,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
+SCALING_TOPOLOGIES = {"chain", "branched", "fragmented", "ring"}
+
+
 def load_rows(path: Path):
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
@@ -20,6 +23,8 @@ def synthetic_parts(dataset: str) -> tuple[str, int] | None:
     rest = dataset[len("synthetic_"):]
     try:
         topology, size = rest.rsplit("_", 1)
+        if topology not in SCALING_TOPOLOGIES:
+            return None
         return topology, int(size)
     except (ValueError, IndexError):
         return None
