@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "datasets": [
+    {
+      "name": "bandage-plasmids",
+      "tier": "smoke",
+      "kind": "download",
+      "producer": "Bandage test fixture",
+      "description": "Embedded sequences, non-zero overlaps, LN and RC tags.",
+      "url": "https://raw.githubusercontent.com/rrwick/Bandage/c89b9cffca3dcf010720b18e57c0454247aa9837/tests/test_plasmids.gfa",
+      "filename": "bandage_test_plasmids.gfa",
+      "expected_bytes": 15243,
+      "features": ["S", "L", "embedded-sequence", "LN", "RC", "nonzero-overlap"],
+      "expect": {"segments": 9, "gfa_links": 12}
+    },
+    {
+      "name": "bandage-noseq",
+      "tier": "smoke",
+      "kind": "download",
+      "producer": "Bandage test fixture",
+      "description": "Sequence-less GFA using '*' with LN and KC tags.",
+      "url": "https://raw.githubusercontent.com/rrwick/Bandage/c89b9cffca3dcf010720b18e57c0454247aa9837/tests/test_plasmids_separate_sequences.gfa",
+      "filename": "bandage_test_plasmids_noseq.gfa",
+      "expected_bytes": 463,
+      "features": ["S", "L", "missing-sequence", "LN", "KC", "nonzero-overlap"],
+      "expect": {"segments": 9, "gfa_links": 12}
+    },
+    {
+      "name": "vg-paths-walks",
+      "tier": "smoke",
+      "kind": "download",
+      "producer": "vg test fixture",
+      "description": "GFA1.1 with multiple components, P paths, W walks and reverse traversal.",
+      "url": "https://raw.githubusercontent.com/vgteam/vg/d08602f3855d5eb5ca406a388b01d2cd12c002d5/test/graphs/components_paths_walks.gfa",
+      "filename": "vg_components_paths_walks.gfa",
+      "expected_bytes": 467,
+      "features": ["GFA1.1", "S", "L", "P", "W", "reverse-orientation"],
+      "expect": {"gfa_version": "1.1", "segments": 12, "gfa_links": 13, "gfa_paths": 2, "gfa_walks": 4}
+    },
+    {
+      "name": "vg-chopping-walks",
+      "tier": "smoke",
+      "kind": "download",
+      "producer": "vg test fixture",
+      "description": "GFA1.1 walk records with multiple headers and sample/haplotype metadata.",
+      "url": "https://raw.githubusercontent.com/vgteam/vg/d08602f3855d5eb5ca406a388b01d2cd12c002d5/test/graphs/chopping_walks.gfa",
+      "filename": "vg_chopping_walks.gfa",
+      "expected_bytes": 232,
+      "features": ["GFA1.1", "multiple-H", "S", "W"],
+      "expect": {"gfa_version": "1.1", "segments": 9, "gfa_walks": 3}
+    },
+    {
+      "name": "vg-disconnected",
+      "tier": "smoke",
+      "kind": "download",
+      "producer": "vg test fixture",
+      "description": "Small disconnected graph for component handling.",
+      "url": "https://raw.githubusercontent.com/vgteam/vg/d08602f3855d5eb5ca406a388b01d2cd12c002d5/test/graphs/disconnected.gfa",
+      "filename": "vg_disconnected.gfa",
+      "expected_bytes": 273,
+      "features": ["disconnected-components"]
+    },
+    {
+      "name": "vg-cactus-brca2",
+      "tier": "standard",
+      "kind": "download",
+      "producer": "vg / Cactus fixture",
+      "description": "Biologically meaningful non-trivial BRCA2 pangenome graph used in vg tests.",
+      "url": "https://raw.githubusercontent.com/vgteam/vg/d08602f3855d5eb5ca406a388b01d2cd12c002d5/test/graphs/cactus-BRCA2.gfa",
+      "filename": "vg_cactus_BRCA2.gfa",
+      "expected_bytes": 142181,
+      "features": ["GFA1.1", "pangenome", "biological"]
+    },
+    {
+      "name": "spades-esc",
+      "tier": "standard",
+      "kind": "download",
+      "producer": "SPAdes",
+      "description": "Public SPAdes assembly graph distributed with agtools.",
+      "url": "https://raw.githubusercontent.com/Vini2/agtools/70fb018ca01c011045c44f26a425bf38ab53eb13/tests/data/ESC/assembly_graph_with_scaffolds.gfa",
+      "filename": "spades_ESC_assembly_graph_with_scaffolds.gfa",
+      "expected_bytes": 8413993,
+      "features": ["SPAdes", "real-assembler", "medium"],
+      "expect": {"segments": 982, "gfa_links": 1265}
+    },
+    {
+      "name": "flye-1y3b",
+      "tier": "standard",
+      "kind": "download",
+      "producer": "Flye",
+      "description": "Public Flye assembly graph distributed with agtools.",
+      "url": "https://raw.githubusercontent.com/Vini2/agtools/70fb018ca01c011045c44f26a425bf38ab53eb13/tests/data/1Y3B/assembly_graph.gfa",
+      "filename": "flye_1Y3B_assembly_graph.gfa",
+      "expected_bytes": 23164100,
+      "features": ["Flye", "real-assembler", "medium"]
+    },
+    {
+      "name": "megahit-5g",
+      "tier": "standard",
+      "kind": "download",
+      "producer": "MEGAHIT",
+      "description": "Public MEGAHIT final graph distributed with agtools.",
+      "url": "https://raw.githubusercontent.com/Vini2/agtools/70fb018ca01c011045c44f26a425bf38ab53eb13/tests/data/5G/final.gfa",
+      "filename": "megahit_5G_final.gfa",
+      "expected_bytes": 31195049,
+      "features": ["MEGAHIT", "real-assembler", "medium"]
+    },
+    {
+      "name": "myloasm",
+      "tier": "standard",
+      "kind": "download",
+      "producer": "myloasm",
+      "description": "Real myloasm-style GFA with producer-specific 'a' records and depth tags.",
+      "url": "https://raw.githubusercontent.com/Vini2/agtools/70fb018ca01c011045c44f26a425bf38ab53eb13/tests/data/myloasm/final_contig_graph.gfa",
+      "filename": "myloasm_final_contig_graph.gfa",
+      "expected_bytes": 3020,
+      "features": ["myloasm", "missing-sequence", "producer-specific-records", "DP-tags"]
+    },
+    {
+      "name": "hprc-v1.1-chr22",
+      "tier": "large",
+      "kind": "download-gzip",
+      "producer": "HPRC minigraph-cactus",
+      "description": "HPRC v1.1 chromosome 22 minigraph-cactus clip graph, GRCh38 reference.",
+      "url": "https://zenodo.org/records/19573105/files/chr22.mc-grch38.sorted.gfa.gz?download=1",
+      "filename": "hprc_v1.1_chr22_mc_grch38.sorted.gfa",
+      "source_filename": "hprc_v1.1_chr22_mc_grch38.sorted.gfa.gz",
+      "expected_md5": "f4a8e7e3a8eb1095c375fc4a0eabd595",
+      "features": ["HPRC", "minigraph-cactus", "pangenome", "W", "large"]
+    },
+    {
+      "name": "hifiasm-chr11-2m",
+      "tier": "standard",
+      "kind": "generated-hifiasm",
+      "producer": "hifiasm",
+      "description": "Generated with the installed hifiasm from its official chr11-2M test reads.",
+      "input_url": "https://github.com/chhylp123/hifiasm/releases/download/v0.7/chr11-2M.fa.gz",
+      "input_filename": "hifiasm_chr11-2M.fa.gz",
+      "filename": "hifiasm_chr11_2m.bp.p_ctg.gfa",
+      "features": ["hifiasm", "current-generator", "real-assembler"]
+    }
+  ]
+}
