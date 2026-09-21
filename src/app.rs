@@ -12,11 +12,11 @@ use crate::filter::{ColorMode, FilterParams};
 use crate::gfa::GfaGraph;
 use crate::graph::ViewGraph;
 use crate::layout::{Layout, LayoutBackend, LayoutParams, LayoutRunner};
-use crate::render::{draw_graph, hit_test_node, RenderParams};
+use crate::render::{draw_gfa_overlays, draw_graph, hit_test_node, RenderParams};
 use crate::selection::Selection;
 use crate::ui::{
-    component_table, display_panel, filter_panel, selection_panel, stats_panel, DisplayOptions,
-    ThemePreset,
+    component_table, display_panel, filter_panel, overlays_panel, selection_panel, stats_panel,
+    DisplayOptions, OverlayOptions, ThemePreset,
 };
 
 // ── Load state machine ────────────────────────────────────────────────────────
@@ -90,6 +90,7 @@ pub struct GfaApp {
     remote_ui: bool,
     filter: FilterParams,
     display: DisplayOptions,
+    overlays: OverlayOptions,
     selection: Selection,
     zoom: f32,
     pan: Vec2,
@@ -126,6 +127,7 @@ impl GfaApp {
             remote_ui,
             filter: FilterParams::default(),
             display: DisplayOptions::default(),
+            overlays: OverlayOptions::default(),
             selection: Selection::default(),
             zoom: 1.0,
             pan: Vec2::ZERO,
@@ -165,6 +167,7 @@ impl GfaApp {
     fn start_load(&mut self, path: PathBuf) {
         self.status_msg = format!("Loading {}…", path.display());
         self.selection.clear();
+        self.overlays = OverlayOptions::default();
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
 
@@ -553,6 +556,17 @@ impl GfaApp {
                         }
                         ui.separator();
                     }
+                    if let LoadState::Loaded { gfa, .. } = &self.load_state {
+                        if !gfa.paths.is_empty()
+                            || !gfa.walks.is_empty()
+                            || !gfa.containments.is_empty()
+                        {
+                            if overlays_panel(ui, gfa, &mut self.overlays) {
+                                ctx.request_repaint();
+                            }
+                            ui.separator();
+                        }
+                    }
                     if self.show_stats_panel {
                         if let LoadState::Loaded { stats, view, .. } = &self.load_state {
                             stats_panel(ui, stats, view);
@@ -873,6 +887,7 @@ impl GfaApp {
 
             // ── Draw ─────────────────────────────────────────────────────────
             if let LoadState::Loaded {
+                gfa,
                 view,
                 layout_snapshot,
                 ..
@@ -890,6 +905,18 @@ impl GfaApp {
                     layout_snapshot,
                     &self.selection,
                     &rp,
+                );
+
+                draw_gfa_overlays(
+                    &painter,
+                    viewport,
+                    gfa,
+                    view,
+                    layout_snapshot,
+                    &rp,
+                    self.overlays.selected_path,
+                    self.overlays.selected_walk,
+                    self.overlays.show_containments,
                 );
 
                 // Rubber-band rect.
