@@ -1,5 +1,32 @@
 # Layout and interaction
 
+## Experimental Rust initial layout
+
+The `rust-layout` branch contains a second initial-layout backend implemented in Rust. It is intentionally kept beside the existing Bandage/OGDF backend while its geometry and performance are evaluated.
+
+The Rust backend operates on the same reduced representation Graphite currently passes to OGDF. For graphs above 100,000 active physics points, each contig is represented by its two endpoints and full visual length; intermediate render points are interpolated after layout. Circular components and isolated contigs continue to bypass the general solver.
+
+The first implementation uses:
+
+- deterministic greedy edge matching to build a multilevel hierarchy;
+- coarse-to-fine prolongation with deterministic jitter;
+- a flat 2D Barnes-Hut quadtree for approximate long-range repulsion;
+- weighted spring attraction using Graphite's desired edge lengths;
+- Rayon-parallel per-node repulsive-force evaluation;
+- independent connected-component solves, which can execute in parallel;
+- Graphite's existing component packing after the solver completes.
+
+This is a clean Graphite-specific implementation, not a source translation of OGDF's FMMM/NMM code.
+
+For headless comparison:
+
+```bash
+./target/release/graphite --benchmark --layout-backend bandage graph.gfa
+./target/release/graphite --benchmark --layout-backend rust graph.gfa
+```
+
+The benchmark JSON includes `layout_backend`. The normal GUI still uses the Bandage backend while the Rust implementation is experimental.
+
 Initial layout uses the actual OGDF FMMM implementation bundled in `Bandage/ogdf`.
 The native wrapper follows `Bandage/program/graphlayoutworker.cpp` at quality 1:
 12 fixed iterations, 8 fine-tuning iterations, multipole precision 2, and 50
