@@ -81,7 +81,7 @@
       "filename": "spades_ESC_assembly_graph_with_scaffolds.gfa",
       "expected_bytes": 8413993,
       "features": ["SPAdes", "real-assembler", "medium"],
-      "expect": {"segments": 982, "gfa_links": 1265}
+      "expect": {"segments": 982, "gfa_links": 1318, "gfa_paths": 190}
     },
     {
       "name": "flye-1y3b",
