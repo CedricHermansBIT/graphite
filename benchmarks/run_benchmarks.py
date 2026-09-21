@@ -9,13 +9,15 @@ import json
 import os
 import platform
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -98,8 +100,12 @@ def version(command: list[str] | None) -> str | None:
         return None
     try:
         result = subprocess.run(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=15, check=False
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            check=False,
         )
         lines = result.stdout.strip().splitlines()
         return lines[0] if lines else f"exit={result.returncode}"
@@ -113,6 +119,12 @@ def expand(command: list[str], input_path: Path, output_path: Path) -> list[str]
         part.replace("{input}", values["input"]).replace("{output}", values["output"])
         for part in command
     ]
+
+
+def tool_environment(tool: dict[str, Any]) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update({str(key): str(value) for key, value in tool.get("env", {}).items()})
+    return env
 
 
 def proc_tree_rss(root_pid: int) -> int | None:
@@ -194,11 +206,19 @@ def graphite_json(stdout: str) -> dict[str, Any] | None:
 
 
 def run_once(
-    tool: dict[str, Any], dataset: dict[str, Any], run_index: int, warmup: bool,
-    timeout_s: float, sample_s: float, output_dir: Path
+    tool: dict[str, Any],
+    dataset: dict[str, Any],
+    run_index: int,
+    warmup: bool,
+    timeout_s: float,
+    sample_s: float,
+    output_dir: Path,
+    mode: str,
+    jobs: int,
 ) -> dict[str, Any]:
     input_path = Path(dataset["path"])
-    output_path = output_dir / f"{tool['name']}__{dataset['name']}__{run_index}.svg"
+    phase = "warmup" if warmup else "run"
+    output_path = output_dir / f"{tool['name']}__{dataset['name']}__{phase}{run_index}.svg"
     command = expand(tool["command"], input_path, output_path)
 
     stdout_tmp = tempfile.NamedTemporaryFile(prefix="graphite-bench-out-", delete=False)
@@ -212,7 +232,11 @@ def run_once(
 
     gnu_time = Path("/usr/bin/time")
     use_gnu_time = sys.platform.startswith("linux") and gnu_time.is_file()
-    launch = [str(gnu_time), "-v", "-o", str(time_path), "--", *command] if use_gnu_time else command
+    launch = (
+        [str(gnu_time), "-v", "-o", str(time_path), "--", *command]
+        if use_gnu_time
+        else command
+    )
 
     start = time.perf_counter()
     peak_sample = 0
@@ -222,8 +246,12 @@ def run_once(
     try:
         with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
             process = subprocess.Popen(
-                launch, stdout=out, stderr=err, cwd=tool.get("cwd") or None,
-                start_new_session=(os.name == "posix")
+                launch,
+                stdout=out,
+                stderr=err,
+                cwd=tool.get("cwd") or None,
+                env=tool_environment(tool),
+                start_new_session=(os.name == "posix"),
             )
             while process.poll() is None:
                 rss = proc_tree_rss(process.pid)
@@ -246,7 +274,11 @@ def run_once(
     stderr = stderr_path.read_text(errors="replace")
     measured = parse_gnu_time(time_path) if use_gnu_time else {}
     peak_rss = int(measured.get("peak_rss_bytes", peak_sample)) or None
-    rss_source = "gnu_time" if measured.get("peak_rss_bytes") else ("proc_sample" if peak_sample else None)
+    rss_source = (
+        "gnu_time"
+        if measured.get("peak_rss_bytes")
+        else ("proc_sample" if peak_sample else None)
+    )
     for path in (stdout_path, stderr_path, time_path):
         path.unlink(missing_ok=True)
 
@@ -266,13 +298,24 @@ def run_once(
 
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "tool": tool["name"], "dataset": dataset["name"], "run": run_index,
-        "warmup": warmup, "status": status, "exit_code": exit_code,
-        "timed_out": timed_out, "wall_seconds": wall,
-        "peak_rss_bytes": peak_rss, "peak_rss_source": rss_source,
+        "tool": tool["name"],
+        "dataset": dataset["name"],
+        "run": run_index,
+        "warmup": warmup,
+        "mode": mode,
+        "jobs": jobs,
+        "contention_warning": mode == "exploratory" and jobs > 1,
+        "status": status,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "wall_seconds": wall,
+        "peak_rss_bytes": peak_rss,
+        "peak_rss_source": rss_source,
         "user_seconds": measured.get("user_seconds"),
         "system_seconds": measured.get("system_seconds"),
-        "output_bytes": output_bytes, "command": command,
+        "output_bytes": output_bytes,
+        "command": command,
+        "tool_env": tool.get("env", {}),
         "launch_error": launch_error,
         "stdout_tail": "\n".join(stdout.splitlines()[-20:]),
         "stderr_tail": "\n".join(stderr.splitlines()[-20:]),
@@ -282,10 +325,28 @@ def run_once(
 
 def write_csv(records: list[dict[str, Any]], path: Path) -> None:
     fields = [
-        "tool", "dataset", "run", "warmup", "status", "exit_code", "timed_out",
-        "wall_seconds", "peak_rss_bytes", "peak_rss_source", "user_seconds",
-        "system_seconds", "output_bytes", "parse_ms", "view_graph_ms",
-        "initial_layout_ms", "refinement_ms", "export_ms", "total_ms",
+        "tool",
+        "dataset",
+        "run",
+        "warmup",
+        "mode",
+        "jobs",
+        "contention_warning",
+        "status",
+        "exit_code",
+        "timed_out",
+        "wall_seconds",
+        "peak_rss_bytes",
+        "peak_rss_source",
+        "user_seconds",
+        "system_seconds",
+        "output_bytes",
+        "parse_ms",
+        "view_graph_ms",
+        "initial_layout_ms",
+        "refinement_ms",
+        "export_ms",
+        "total_ms",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -293,10 +354,242 @@ def write_csv(records: list[dict[str, Any]], path: Path) -> None:
         for record in records:
             row = {field: record.get(field) for field in fields}
             internal = record.get("internal") or {}
-            for field in ["parse_ms", "view_graph_ms", "initial_layout_ms",
-                          "refinement_ms", "export_ms", "total_ms"]:
+            for field in [
+                "parse_ms",
+                "view_graph_ms",
+                "initial_layout_ms",
+                "refinement_ms",
+                "export_ms",
+                "total_ms",
+            ]:
                 row[field] = internal.get(field)
             writer.writerow(row)
+
+
+def print_record(record: dict[str, Any]) -> None:
+    rss = record["peak_rss_bytes"]
+    rss_text = f", {rss / 2**20:.1f} MiB" if rss else ""
+    phase = "warmup" if record["warmup"] else f"run {record['run'] + 1}"
+    print(
+        f"[{record['tool']}] {record['dataset']} - {phase}: "
+        f"{record['status']} {record['wall_seconds']:.3f} s{rss_text}",
+        flush=True,
+    )
+
+
+def append_record(
+    record: dict[str, Any], records: list[dict[str, Any]], raw: Any
+) -> None:
+    records.append(record)
+    raw.write(json.dumps(record) + "\n")
+    raw.flush()
+    print_record(record)
+
+
+def run_tasks(
+    tasks: Iterable[tuple[dict[str, Any], dict[str, Any], int, bool]],
+    jobs: int,
+    timeout_s: float,
+    sample_s: float,
+    output_dir: Path,
+    mode: str,
+    records: list[dict[str, Any]],
+    raw: Any,
+) -> None:
+    task_list = list(tasks)
+    if not task_list:
+        return
+    if jobs == 1:
+        for tool, dataset, run_index, warmup in task_list:
+            append_record(
+                run_once(
+                    tool,
+                    dataset,
+                    run_index,
+                    warmup,
+                    timeout_s,
+                    sample_s,
+                    output_dir,
+                    mode,
+                    jobs,
+                ),
+                records,
+                raw,
+            )
+        return
+
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(
+                run_once,
+                tool,
+                dataset,
+                run_index,
+                warmup,
+                timeout_s,
+                sample_s,
+                output_dir,
+                mode,
+                jobs,
+            ): (tool["name"], dataset["name"], run_index, warmup)
+            for tool, dataset, run_index, warmup in task_list
+        }
+        for future in as_completed(futures):
+            append_record(future.result(), records, raw)
+
+
+def adaptive_target(
+    pilot_records: list[dict[str, Any]],
+    maximum: int,
+    settings: dict[str, Any],
+) -> int:
+    pilot = int(settings.get("pilot_repetitions", 2))
+    fast_s = float(settings.get("fast_seconds", 10.0))
+    slow_s = float(settings.get("slow_seconds", 60.0))
+    fast_reps = int(settings.get("fast_repetitions", maximum))
+    medium_reps = int(settings.get("medium_repetitions", min(3, maximum)))
+    slow_reps = int(settings.get("slow_repetitions", min(2, maximum)))
+
+    successes = [
+        record["wall_seconds"] for record in pilot_records if record["status"] == "ok"
+    ]
+    if not successes:
+        return min(maximum, pilot)
+    median_s = statistics.median(successes)
+    if median_s < fast_s:
+        target = fast_reps
+    elif median_s < slow_s:
+        target = medium_reps
+    else:
+        target = slow_reps
+    return min(maximum, max(pilot, target))
+
+
+def publication_run(
+    tools: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+    repeats: int,
+    warmups: int,
+    timeout_s: float,
+    sample_s: float,
+    output_dir: Path,
+    records: list[dict[str, Any]],
+    raw: Any,
+) -> None:
+    for dataset in datasets:
+        for warmup_index in range(warmups):
+            run_tasks(
+                ((tool, dataset, warmup_index, True) for tool in tools),
+                1,
+                timeout_s,
+                sample_s,
+                output_dir,
+                "publication",
+                records,
+                raw,
+            )
+        for run_index in range(repeats):
+            run_tasks(
+                ((tool, dataset, run_index, False) for tool in tools),
+                1,
+                timeout_s,
+                sample_s,
+                output_dir,
+                "publication",
+                records,
+                raw,
+            )
+
+
+def exploratory_run(
+    tools: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+    repeats: int,
+    warmups: int,
+    jobs: int,
+    adaptive: bool,
+    settings: dict[str, Any],
+    timeout_s: float,
+    sample_s: float,
+    output_dir: Path,
+    records: list[dict[str, Any]],
+    raw: Any,
+) -> dict[str, int]:
+    warmup_tasks = [
+        (tool, dataset, warmup_index, True)
+        for warmup_index in range(warmups)
+        for dataset in datasets
+        for tool in tools
+    ]
+    run_tasks(
+        warmup_tasks,
+        jobs,
+        timeout_s,
+        sample_s,
+        output_dir,
+        "exploratory",
+        records,
+        raw,
+    )
+
+    pilot = (
+        min(repeats, int(settings.get("pilot_repetitions", 2)))
+        if adaptive
+        else repeats
+    )
+    pilot_tasks = [
+        (tool, dataset, run_index, False)
+        for run_index in range(pilot)
+        for dataset in datasets
+        for tool in tools
+    ]
+    run_tasks(
+        pilot_tasks,
+        jobs,
+        timeout_s,
+        sample_s,
+        output_dir,
+        "exploratory",
+        records,
+        raw,
+    )
+
+    targets: dict[tuple[str, str], int] = {}
+    for dataset in datasets:
+        for tool in tools:
+            key = (tool["name"], dataset["name"])
+            if adaptive:
+                pair_pilots = [
+                    record
+                    for record in records
+                    if not record["warmup"]
+                    and record["tool"] == tool["name"]
+                    and record["dataset"] == dataset["name"]
+                ]
+                targets[key] = adaptive_target(pair_pilots, repeats, settings)
+            else:
+                targets[key] = repeats
+
+    extra_tasks = []
+    for dataset in datasets:
+        for tool in tools:
+            target = targets[(tool["name"], dataset["name"])]
+            for run_index in range(pilot, target):
+                extra_tasks.append((tool, dataset, run_index, False))
+    run_tasks(
+        extra_tasks,
+        jobs,
+        timeout_s,
+        sample_s,
+        output_dir,
+        "exploratory",
+        records,
+        raw,
+    )
+    return {
+        f"{tool}/{dataset}": target
+        for (tool, dataset), target in sorted(targets.items())
+    }
 
 
 def main() -> int:
@@ -305,13 +598,49 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("benchmarks/results"))
     parser.add_argument("--tool", action="append")
     parser.add_argument("--dataset", action="append")
+    parser.add_argument(
+        "--mode",
+        choices=["publication", "exploratory"],
+        default="publication",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help="parallel benchmark processes in exploratory mode; publication mode requires 1",
+    )
+    parser.add_argument(
+        "--no-adaptive",
+        action="store_true",
+        help="disable adaptive measured-repeat counts in exploratory mode",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
-    tools = [x for x in config["tools"] if not args.tool or x["name"] in args.tool]
-    datasets = [x for x in config["datasets"] if not args.dataset or x["name"] in args.dataset]
+    tools = [
+        item
+        for item in config["tools"]
+        if not args.tool or item["name"] in args.tool
+    ]
+    datasets = [
+        item
+        for item in config["datasets"]
+        if not args.dataset or item["name"] in args.dataset
+    ]
     if not tools or not datasets:
         raise SystemExit("selection produced no tools or datasets")
+
+    if args.jobs is not None and args.jobs < 1:
+        raise SystemExit("--jobs must be at least 1")
+    if args.mode == "publication":
+        if args.jobs not in (None, 1):
+            raise SystemExit(
+                "publication mode is intentionally serial; "
+                "use --mode exploratory for --jobs > 1"
+            )
+        jobs = 1
+    else:
+        jobs = args.jobs or min(4, os.cpu_count() or 1)
 
     args.output.mkdir(parents=True, exist_ok=True)
     for dataset in datasets:
@@ -320,39 +649,84 @@ def main() -> int:
             raise SystemExit(f"dataset does not exist: {path}")
         dataset["inspection"] = inspect_gfa(path)
 
-    info = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "platform": platform.platform(), "python": platform.python_version(),
-        "cpu_model": cpu_model(), "logical_cpus": os.cpu_count(),
-        "total_memory_bytes": total_memory_bytes(), "git_commit": git_commit(),
-        "tools": {tool["name"]: version(tool.get("version_command")) for tool in tools},
-        "datasets": datasets, "config": config,
-    }
-    (args.output / "run_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
-
     repeats = int(config.get("repetitions", 5))
     warmups = int(config.get("warmups", 1))
     timeout_s = float(config.get("timeout_seconds", 900))
     sample_s = float(config.get("sample_interval_ms", 50)) / 1000.0
+    adaptive_settings = config.get("adaptive_repetitions", {})
+    adaptive = (
+        args.mode == "exploratory"
+        and not args.no_adaptive
+        and bool(adaptive_settings.get("enabled", True))
+    )
+
+    info = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "cpu_model": cpu_model(),
+        "logical_cpus": os.cpu_count(),
+        "total_memory_bytes": total_memory_bytes(),
+        "git_commit": git_commit(),
+        "mode": args.mode,
+        "jobs": jobs,
+        "contention_warning": args.mode == "exploratory" and jobs > 1,
+        "adaptive_repetitions": adaptive,
+        "tools": {
+            tool["name"]: version(tool.get("version_command"))
+            for tool in tools
+        },
+        "tool_environments": {
+            tool["name"]: tool.get("env", {})
+            for tool in tools
+        },
+        "datasets": datasets,
+        "config": config,
+    }
+
+    (args.output / "run_info.json").write_text(
+        json.dumps(info, indent=2), encoding="utf-8"
+    )
 
     records: list[dict[str, Any]] = []
     with (args.output / "raw.jsonl").open("w", encoding="utf-8") as raw:
-        for dataset in datasets:
-            for index in range(warmups + repeats):
-                warmup = index < warmups
-                label = "warmup" if warmup else f"repeat {index - warmups + 1}/{repeats}"
-                for tool in tools:
-                    print(f"[{tool['name']}] {dataset['name']} - {label}", flush=True)
-                    record = run_once(
-                        tool, dataset, index, warmup, timeout_s, sample_s, args.output
-                    )
-                    records.append(record)
-                    raw.write(json.dumps(record) + "\n")
-                    raw.flush()
-                    rss = record["peak_rss_bytes"]
-                    rss_text = f", {rss / 2**20:.1f} MiB" if rss else ""
-                    print(f"  {record['status']}: {record['wall_seconds']:.3f} s{rss_text}", flush=True)
+        if args.mode == "publication":
+            publication_run(
+                tools,
+                datasets,
+                repeats,
+                warmups,
+                timeout_s,
+                sample_s,
+                args.output,
+                records,
+                raw,
+            )
+            targets = {
+                f"{tool['name']}/{dataset['name']}": repeats
+                for dataset in datasets
+                for tool in tools
+            }
+        else:
+            targets = exploratory_run(
+                tools,
+                datasets,
+                repeats,
+                warmups,
+                jobs,
+                adaptive,
+                adaptive_settings,
+                timeout_s,
+                sample_s,
+                args.output,
+                records,
+                raw,
+            )
 
+    info["measured_repetition_targets"] = targets
+    (args.output / "run_info.json").write_text(
+        json.dumps(info, indent=2), encoding="utf-8"
+    )
     write_csv(records, args.output / "raw.csv")
     return 0
 
