@@ -23,6 +23,26 @@ Graphite uses its Graphite-specific multilevel Rust implementation as the defaul
 - Graphite, Midnight, Light, and Paper interface themes under **Settings → Theme**.
 - SVG and PNG figure export using the selected UI theme.
 
+## GFA support
+
+Graphite currently targets GFA1. Header version tags are parsed and genuine GFA2 input is rejected explicitly rather than being misinterpreted as GFA1.
+
+| Record | Support |
+| --- | --- |
+| `H` header | Parsed, including `VN` version detection and generic optional tags |
+| `S` segment | Parsed and visualized; `LN`, `DP`, `RD` and `RC` are interpreted directly |
+| `L` link | Parsed and visualized; overlap CIGAR and optional tags are preserved |
+| `J` jump (GFA1.2) | Parsed and visualized as a dashed graph connection; distance and `SC:i:1` are preserved |
+| `P` path | Parsed into oriented path steps, including comma/link and semicolon/jump transitions |
+| `W` walk (GFA1.1) | Parsed with sample, haplotype, sequence coordinates and oriented steps |
+| `C` containment | Parsed and preserved, including position, orientation, CIGAR and tags |
+
+Optional fields are stored in a generic zero-copy tag table, so standard or producer-specific tags can be retained even when Graphite does not assign them dedicated UI behavior.
+
+At present, `P`, `W` and `C` records are available to the data model and reported in the Assembly panel but do not yet have dedicated path/walk/containment overlays. Containments are deliberately not converted to ordinary endpoint links because their attachment position may lie inside the container segment.
+
+GFA2 `S/E/F/G/O/U` records are not implemented yet.
+
 ## Requirements
 
 - Rust stable with Rust 2024 edition support (Rust 1.85 or newer). Update with `rustup update stable`.
