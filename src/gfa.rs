@@ -74,6 +74,7 @@ pub struct Tag {
     pub value_range: Range<usize>,
 }
 
+#[allow(dead_code)]
 impl Tag {
     pub fn name_eq(&self, name: &[u8; 2]) -> bool {
         self.name[0].eq_ignore_ascii_case(&name[0])
@@ -84,12 +85,14 @@ impl Tag {
 #[derive(Debug, Clone)]
 pub struct Header {
     /// Range into GfaGraph::tags.
+    #[allow(dead_code)]
     pub tag_range: Range<usize>,
 }
 
 /// A segment (S line). The sequence is stored as a byte-range into the mmap.
 #[derive(Debug, Clone)]
 pub struct Segment {
+    #[allow(dead_code)]
     pub id: usize,
     pub name: Arc<str>,
     /// Range into GfaGraph::mmap; empty if sequence is *.
@@ -100,6 +103,7 @@ pub struct Segment {
     /// Optional RC tag (read count).
     pub read_count: Option<u64>,
     /// All optional tags, including tags Graphite interprets explicitly.
+    #[allow(dead_code)]
     pub tag_range: Range<usize>,
 }
 
@@ -117,7 +121,9 @@ pub struct Link {
     pub to: usize,
     pub to_strand: Strand,
     /// Overlap CIGAR in the mmap; empty for *.
+    #[allow(dead_code)]
     pub overlap_range: Range<usize>,
+    #[allow(dead_code)]
     pub tag_range: Range<usize>,
 }
 
@@ -131,6 +137,7 @@ pub struct Jump {
     pub distance: Option<i64>,
     /// SC:i:1 marks a shortcut jump.
     pub shortcut: bool,
+    #[allow(dead_code)]
     pub tag_range: Range<usize>,
 }
 
@@ -139,6 +146,7 @@ pub struct Jump {
 /// Containments are preserved in the data model but are not converted into
 /// ordinary endpoint-to-endpoint display links: position can attach the
 /// contained segment inside the container.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Containment {
     pub container: usize,
@@ -157,6 +165,7 @@ pub enum PathConnection {
     Jump,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathStep {
     pub segment: usize,
@@ -166,6 +175,7 @@ pub struct PathStep {
 }
 
 /// A GFA1 path (P line).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GfaPath {
     pub name: Arc<str>,
@@ -175,6 +185,7 @@ pub struct GfaPath {
     pub overlaps_range: Range<usize>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrientedSegment {
     pub segment: usize,
@@ -182,6 +193,7 @@ pub struct OrientedSegment {
 }
 
 /// A GFA1.1 walk (W line).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Walk {
     pub sample_id: Arc<str>,
@@ -198,6 +210,7 @@ pub struct GfaGraph {
     /// Memory-mapped file kept alive as long as the graph lives.
     pub mmap: Mmap,
     pub version: GfaVersion,
+    #[allow(dead_code)]
     pub headers: Vec<Header>,
     pub segments: Vec<Segment>,
     /// Number of segments with an embedded nucleotide sequence.
@@ -206,15 +219,19 @@ pub struct GfaGraph {
     pub jumps: Vec<Jump>,
     pub containments: Vec<Containment>,
     pub paths: Vec<GfaPath>,
+    #[allow(dead_code)]
     pub path_steps: Vec<PathStep>,
     pub walks: Vec<Walk>,
+    #[allow(dead_code)]
     pub walk_steps: Vec<OrientedSegment>,
     /// Flat optional-tag storage. Record structs index this with tag_range.
     pub tags: Vec<Tag>,
     /// Name -> segment index lookup.
+    #[allow(dead_code)]
     pub name_index: HashMap<Arc<str>, usize>,
 }
 
+#[allow(dead_code)]
 impl GfaGraph {
     pub fn segment_sequence(&self, seg: &Segment) -> &[u8] {
         seg.sequence(&self.mmap)
