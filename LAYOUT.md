@@ -2,7 +2,7 @@
 
 ## Rust initial layout backend
 
-Graphite includes two initial-layout backends: the native Bandage/OGDF FMMM bridge and a Graphite-specific Rust implementation. Both are kept available for validation, benchmarking and reproducibility.
+Graphite uses a Graphite-specific Rust implementation as its default initial-layout backend. The native Bandage/OGDF FMMM bridge remains available as a reference backend for validation, benchmarking and reproducibility.
 
 Both backends receive the same reduced Graphite representation. For graphs above 100,000 active physics points, each contig is represented by its two endpoints and full visual length; intermediate render points are interpolated after layout. Circular components and isolated contigs bypass the general solver.
 
