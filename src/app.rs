@@ -390,16 +390,52 @@ impl GfaApp {
                         }
                         ui.close();
                     }
+                });
+
+                ui.menu_button("Export", |ui| {
+                    let svg = ui
+                        .add_enabled(can_export_figure, egui::Button::new("Figure as SVG…"))
+                        .on_disabled_hover_text("Load a graph before exporting a figure.");
+                    if svg.clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SVG", &["svg"])
+                            .set_file_name("graphite.svg")
+                            .save_file()
+                        {
+                            self.export_figure(&path, true);
+                        }
+                        ui.close();
+                    }
+
+                    let png = ui
+                        .add_enabled(
+                            can_export_figure,
+                            egui::Button::new("Figure as PNG (2400 × 1600)…"),
+                        )
+                        .on_disabled_hover_text("Load a graph before exporting a figure.");
+                    if png.clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PNG", &["png"])
+                            .set_file_name("graphite.png")
+                            .save_file()
+                        {
+                            self.export_figure(&path, false);
+                        }
+                        ui.close();
+                    }
+
                     ui.separator();
+
                     let export_fasta_response = ui
                         .add_enabled(
                             can_export_fasta,
-                            egui::Button::new("Export FASTA (selected)…"),
+                            egui::Button::new("Selected segments as FASTA…"),
                         )
                         .on_disabled_hover_text(fasta_disabled_reason);
                     if export_fasta_response.clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("FASTA", &["fa", "fasta"])
+                            .set_file_name("selection.fasta")
                             .save_file()
                         {
                             if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
@@ -412,9 +448,14 @@ impl GfaApp {
                         }
                         ui.close();
                     }
-                    if ui.button("Export CSV stats…").clicked() {
+
+                    let csv = ui
+                        .add_enabled(can_export_figure, egui::Button::new("Graph statistics as CSV…"))
+                        .on_disabled_hover_text("Load a graph before exporting statistics.");
+                    if csv.clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("CSV", &["csv"])
+                            .set_file_name("graphite-stats.csv")
                             .save_file()
                         {
                             if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
@@ -426,33 +467,6 @@ impl GfaApp {
                         }
                         ui.close();
                     }
-                    ui.separator();
-                    ui.menu_button("Export figure…", |ui| {
-                        let svg = ui
-                            .add_enabled(can_export_figure, egui::Button::new("SVG (vector)…"))
-                            .on_disabled_hover_text("Load a graph before exporting a figure.");
-                        if svg.clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("SVG", &["svg"])
-                                .save_file()
-                            {
-                                self.export_figure(&path, true);
-                            }
-                            ui.close();
-                        }
-                        let png = ui
-                            .add_enabled(can_export_figure, egui::Button::new("PNG (2400 × 1600)…"))
-                            .on_disabled_hover_text("Load a graph before exporting a figure.");
-                        if png.clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("PNG", &["png"])
-                                .save_file()
-                            {
-                                self.export_figure(&path, false);
-                            }
-                            ui.close();
-                        }
-                    });
                 });
 
                 ui.menu_button("View", |ui| {
