@@ -244,9 +244,12 @@ impl GfaApp {
                         }
 
                         self.status_msg = format!(
-                            "Loaded {} segments, {} links",
+                            "Loaded {} segments, {} links, {} jumps, {} paths, {} walks",
                             gfa.segments.len(),
-                            gfa.links.len()
+                            gfa.links.len(),
+                            gfa.jumps.len(),
+                            gfa.paths.len(),
+                            gfa.walks.len()
                         );
                         self.display.min_depth_color = min_depth_color;
                         self.display.max_depth_color = max_depth_color;
