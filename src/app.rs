@@ -315,15 +315,35 @@ impl GfaApp {
         let params = self.render_params();
         let result = match &self.load_state {
             LoadState::Loaded {
+                gfa,
                 view,
                 layout_snapshot,
                 ..
-            } if svg => crate::export::export_svg(path, view, layout_snapshot, &params),
+            } if svg => crate::export::export_svg_with_overlays(
+                path,
+                gfa,
+                view,
+                layout_snapshot,
+                &params,
+                self.overlays.selected_path,
+                self.overlays.selected_walk,
+                self.overlays.show_containments,
+            ),
             LoadState::Loaded {
+                gfa,
                 view,
                 layout_snapshot,
                 ..
-            } => crate::export::export_png(path, view, layout_snapshot, &params),
+            } => crate::export::export_png_with_overlays(
+                path,
+                gfa,
+                view,
+                layout_snapshot,
+                &params,
+                self.overlays.selected_path,
+                self.overlays.selected_walk,
+                self.overlays.show_containments,
+            ),
             _ => Err(anyhow::anyhow!("No loaded graph to export")),
         };
         self.status_msg = match result {
