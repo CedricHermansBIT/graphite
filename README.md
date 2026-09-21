@@ -158,12 +158,14 @@ The right sidebar contains the paged Components browser and selected-segment det
 
 ## Export
 
-- **Copy sequence** and **Export FASTA** operate on every selected segment that has embedded sequence.
-- **Export CSV stats** exports selected segments, or the full current graph when nothing is selected.
-- **Export figure → SVG** creates a scalable vector graph figure.
-- **Export figure → PNG** creates a 2400 × 1600 raster graph figure.
+The top-level **Export** menu provides all output formats in one place:
 
-SVG and PNG exports use the active graph colours and UI theme background, making them suitable starting points for publication figures.
+- **Figure as SVG…** creates a scalable vector graph figure.
+- **Figure as PNG (2400 × 1600)…** creates a raster graph figure.
+- **Selected segments as FASTA…** exports every selected segment with embedded sequence.
+- **Graph statistics as CSV…** exports selected segments, or the full current graph when nothing is selected.
+
+SVG and PNG exports use the active graph colours, UI theme background and active GFA overlays, making them suitable starting points for publication figures.
 
 ## Project structure
 
