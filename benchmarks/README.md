@@ -99,6 +99,59 @@ Tools are interleaved within each dataset and repetition. This avoids running al
 
 The default therefore measures a warm filesystem-cache workload after the warm-up. If cold-cache loading matters, run it as a separate experiment with explicit OS cache control rather than mixing cold and warm runs.
 
+
+## Exploratory versus publication mode
+
+The runner has two execution modes.
+
+### Exploratory mode
+
+Use this while developing the benchmark set or checking how tools scale:
+
+```bash
+python3 benchmarks/run_benchmarks.py benchmarks/config.local.json \
+  --mode exploratory \
+  --jobs 4
+```
+
+Exploratory mode may run several benchmark processes at the same time. This is much faster when Bandage already takes tens of seconds per graph, but those timings are affected by CPU, cache and memory-bandwidth contention. Records therefore contain `mode="exploratory"`, the worker count, and `contention_warning=true` when more than one job is active.
+
+By default, exploratory mode also uses adaptive measured-repeat counts. It first performs two measured pilot runs for every tool/dataset pair and then chooses how many measured repetitions to keep:
+
+- median below 10 s: 5 measured runs
+- median from 10 s to below 60 s: 3 measured runs
+- median 60 s or higher: 2 measured runs
+
+The thresholds and repetition counts live in `adaptive_repetitions` in the JSON config. Use `--no-adaptive` when you want the full configured repetition count even in exploratory mode.
+
+This means a Bandage dataset taking about 70 s per run stops after two measured repetitions instead of five.
+
+### Publication mode
+
+Use this for numbers that will appear in the manuscript:
+
+```bash
+python3 benchmarks/run_benchmarks.py benchmarks/config.local.json \
+  --mode publication
+```
+
+Publication mode is intentionally serial. Passing `--jobs 2` or higher is rejected so final measurements cannot accidentally be collected under cross-process contention. It always uses the fixed `repetitions` count from the config and ignores adaptive repetition logic.
+
+A practical workflow is to use parallel exploratory mode to choose the final datasets and identify timeout points, then run only that reduced set again in publication mode.
+
+### Thread-count control
+
+Each tool may define an `env` object in the config. The example pins Graphite's Rayon pool:
+
+```json
+"env": {
+  "RAYON_NUM_THREADS": "8"
+}
+```
+
+The runner records these environment overrides in both raw results and `run_info.json`. Pick a thread count that matches the benchmark machine and keep it unchanged for all final Graphite measurements.
+
+
 ## Memory measurement
 
 On Linux, the runner uses GNU `/usr/bin/time -v` when available and records maximum resident set size. It also samples `/proc` during execution and falls back to that estimate if GNU time is unavailable.
