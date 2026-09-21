@@ -74,6 +74,17 @@ cloning all springs and topology. Dense near-field cells can still incur
 quadratic work. Overview rendering culls offscreen edges, merges indistinguishable
 dots, and draws visible contigs as single polylines.
 
+## Remote UI mode
+
+For X11 forwarding over SSH, use `--remote-ui` to reduce continuous layout traffic without slowing the layout solver itself:
+
+```bash
+ssh -YC server
+./target/release/graphite --remote-ui --layout-backend rust graph.gfa
+```
+
+Normal mode publishes layout snapshots and requests animation repaints about every 16 ms. Remote UI mode changes both cadences to 100 ms (about 10 Hz). Pointer, keyboard and other egui input events can still trigger immediate frames, so the throttle mainly affects continuous background layout animation and the large position-buffer copies associated with it. Once the graph is settled the UI remains event-driven in either mode.
+
 ## Building
 
 A C++14 compiler is now required in addition to the Rust toolchain. `build.rs`
