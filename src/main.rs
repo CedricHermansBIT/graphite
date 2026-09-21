@@ -5,6 +5,7 @@ mod gfa;
 mod graph;
 mod layout;
 mod render;
+mod rust_layout;
 mod ui;
 mod filter;
 mod selection;
@@ -29,6 +30,10 @@ struct Args {
     #[argh(option)]
     benchmark_output: Option<String>,
 
+    /// initial layout backend: bandage or rust
+    #[argh(option, default = "String::from(\"bandage\")")]
+    layout_backend: String,
+
     /// GFA file to open on startup
     #[argh(positional)]
     file: Option<String>,
@@ -38,7 +43,7 @@ fn milliseconds(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-fn run_benchmark(path: &str, steps: usize, output: Option<&str>) -> Result<()> {
+fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout::LayoutBackend) -> Result<()> {
     let total_start = Instant::now();
     let file_bytes = std::fs::metadata(path)
         .with_context(|| format!("Cannot stat {path}"))?
@@ -53,7 +58,7 @@ fn run_benchmark(path: &str, steps: usize, output: Option<&str>) -> Result<()> {
     let view_graph_ms = milliseconds(start);
 
     let start = Instant::now();
-    let mut layout = layout::Layout::new_with_graph(&view);
+    let mut layout = layout::Layout::new_with_graph_backend(&view, backend);
     let initial_layout_ms = milliseconds(start);
     let initial_layout_converged = layout.converged;
 
@@ -96,6 +101,7 @@ fn run_benchmark(path: &str, steps: usize, output: Option<&str>) -> Result<()> {
         "schema_version": 1,
         "tool": "graphite",
         "graphite_version": env!("CARGO_PKG_VERSION"),
+        "layout_backend": backend.as_str(),
         "input": path,
         "file_bytes": file_bytes,
         "segments": view.node_count(),
@@ -129,7 +135,17 @@ fn main() -> Result<()> {
             .file
             .as_deref()
             .context("benchmark mode requires a GFA file")?;
-        return run_benchmark(file, args.benchmark_steps, args.benchmark_output.as_deref());
+        let backend = layout::LayoutBackend::parse(&args.layout_backend)
+            .with_context(|| format!(
+                "unknown layout backend '{}'; expected 'bandage' or 'rust'",
+                args.layout_backend
+            ))?;
+        return run_benchmark(
+            file,
+            args.benchmark_steps,
+            args.benchmark_output.as_deref(),
+            backend,
+        );
     }
 
     let native_options = eframe::NativeOptions {
