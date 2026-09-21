@@ -500,7 +500,7 @@ fn visual_length(bp: usize) -> f32 {
 mod tests {
     use super::*;
     use crate::filter::{ComponentSort, ComponentSortOrder, ComponentTopology};
-    use crate::gfa::{GfaVersion, Link, Segment};
+    use crate::gfa::{GfaVersion, Jump, Link, Segment};
     use memmap2::MmapMut;
     use std::ops::Range;
 
@@ -554,6 +554,39 @@ mod tests {
 
     fn names(graph: &ViewGraph) -> Vec<&str> {
         graph.nodes.iter().map(|node| node.name.as_ref()).collect()
+    }
+
+    #[test]
+    fn jump_connections_participate_in_view_topology() {
+        let mut gfa = test_gfa();
+        gfa.jumps.push(Jump {
+            from: 2,
+            from_strand: Strand::Forward,
+            to: 6,
+            to_strand: Strand::Forward,
+            distance: Some(500),
+            shortcut: false,
+            tag_range: 0..0,
+        });
+
+        let graph = ViewGraph::from_gfa(&gfa, &FilterParams::default());
+        assert!(graph.edges.iter().any(|edge| {
+            matches!(
+                edge.kind,
+                EdgeKind::Jump {
+                    distance: Some(500),
+                    shortcut: false
+                }
+            )
+        }));
+
+        let segment_two = graph.seg_to_node[&2];
+        let segment_six = graph.seg_to_node[&6];
+        assert!(graph
+            .components
+            .iter()
+            .any(|component| component.nodes.contains(&segment_two)
+                && component.nodes.contains(&segment_six)));
     }
 
     #[test]
