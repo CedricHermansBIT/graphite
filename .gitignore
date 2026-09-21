@@ -1,1 +1,5 @@
 /target
+/benchmarks/data/
+/benchmarks/data-seq/
+/benchmarks/results/
+/benchmarks/config.local.json
