@@ -9,7 +9,7 @@ use egui::{Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 
 use crate::filter::ColorMode;
 use crate::gfa::Strand;
-use crate::graph::{NodeInfo, ViewGraph};
+use crate::graph::{EdgeKind, NodeInfo, ViewGraph};
 use crate::layout::Layout;
 use crate::selection::Selection;
 
@@ -46,6 +46,26 @@ impl Default for RenderParams {
             canvas_foreground: Color32::from_rgb(190, 205, 226),
             canvas_background: Color32::from_rgb(20, 22, 28),
         }
+    }
+}
+
+fn draw_dashed_segment(painter: &Painter, start: Pos2, end: Pos2, stroke: Stroke) {
+    let delta = end - start;
+    let length = delta.length();
+    if length <= f32::EPSILON {
+        return;
+    }
+    let direction = delta / length;
+    let dash = 6.0_f32;
+    let gap = 4.0_f32;
+    let mut offset = 0.0_f32;
+    while offset < length {
+        let dash_end = (offset + dash).min(length);
+        painter.line_segment(
+            [start + direction * offset, start + direction * dash_end],
+            stroke,
+        );
+        offset += dash + gap;
     }
 }
 
@@ -112,7 +132,12 @@ pub fn draw_graph(
             };
 
             let edge_w = if is_selected { 2.0 } else { 1.0 };
-            painter.line_segment([p0, p1], Stroke::new(edge_w, color));
+            let stroke = Stroke::new(edge_w, color);
+            if matches!(edge.kind, EdgeKind::Jump { .. }) {
+                draw_dashed_segment(painter, p0, p1, stroke);
+            } else {
+                painter.line_segment([p0, p1], stroke);
+            }
         }
     }
 
