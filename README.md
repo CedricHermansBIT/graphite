@@ -115,6 +115,16 @@ python3 benchmarks/run_benchmarks.py benchmarks/config.local.json \
 
 See `benchmarks/README.md` for the complete benchmark workflow.
 
+For parser/layout regression testing against public third-party GFA files, Graphite also includes a compatibility corpus manifest and fetch/run harness under `tests/compatibility/`:
+
+```bash
+python3 tests/compatibility/run_compatibility.py all --tier smoke
+python3 tests/compatibility/run_compatibility.py all --tier standard
+```
+
+The corpus includes commit-pinned Bandage/vg fixtures and real assembler-produced graphs from SPAdes, Flye, MEGAHIT and myloasm, with optional HPRC chr22 and current-hifiasm cases. Downloaded datasets and local SHA-256 lock/results files are gitignored. See `tests/compatibility/README.md`.
+
+
 ## Navigation and selection
 
 | Action | Input |
@@ -128,6 +138,8 @@ See `benchmarks/README.md` for the complete benchmark workflow.
 | Fit the graph | `F` |
 | Switch modes | `P` pan, `S` select, `G` move |
 | Focus a component | Click its row in the Components browser |
+| Focus a path/walk | Select it in **GFA overlays**, then click **Focus** |
+| Select path/walk segments | Select it in **GFA overlays**, then click **Select segments** |
 | Navigate the overview | Click or drag in the minimap |
 | Copy selected sequence(s) | `Ctrl+C` or **Copy sequence** |
 
