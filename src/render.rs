@@ -428,9 +428,9 @@ mod tests {
     }
 
     fn paint(graph: &ViewGraph, layout: &Layout, zoom: f32) -> egui::FullOutput {
-        let ctx = egui::Context::default();
-        ctx.run(egui::RawInput::default(), |ctx| {
-            let painter = ctx.layer_painter(egui::LayerId::new(
+        let mut ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("test"),
             ));
