@@ -698,7 +698,7 @@ impl GfaApp {
                     .collect();
                 nodes.sort_unstable();
                 nodes.dedup();
-                (nodes, path.steps.len(), format!("path {}", path.name))
+                (nodes, path.steps.len(), format!("path {}", path.name.as_ref()))
             }
             (
                 LoadState::Loaded { gfa, view, .. },
@@ -719,7 +719,9 @@ impl GfaApp {
                     walk.steps.len(),
                     format!(
                         "walk {} / h{} / {}",
-                        walk.sample_id, walk.haplotype_index, walk.sequence_id
+                        walk.sample_id.as_ref(),
+                        walk.haplotype_index,
+                        walk.sequence_id.as_ref()
                     ),
                 )
             }
