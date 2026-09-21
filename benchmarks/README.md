@@ -37,7 +37,7 @@ python3 benchmarks/generate_synthetic.py benchmarks/data \
   --topologies chain branched fragmented
 ```
 
-The generator writes deterministic GFA1 `S`/`L` graphs and a `manifest.json`. The default files use `*` instead of embedded sequence and provide `LN`, `DP` and `RC` tags. This lets topology scale without making sequence content dominate file size.
+The generator writes deterministic GFA1 graphs and a `manifest.json`. The original scaling files remain plain `S`/`L` graphs with `LN`, `DP` and `RC` segment tags so historical benchmark runs stay directly comparable.
 
 Available topologies:
 
@@ -46,7 +46,28 @@ Available topologies:
 - `fragmented`: many small linear components
 - `ring`: one circular component
 
-Synthetic graphs characterize scaling. They should not replace real biological assemblies in the paper.
+By default the generator also creates controlled 10k-segment feature datasets:
+
+- `synthetic_tags_10000`: header, segment and link optional tags, including generic/unknown tags
+- `synthetic_jumps_10000`: GFA1.2 `J` connections and `SC:i:1` shortcuts
+- `synthetic_paths_10000`: chunked `P` path records
+- `synthetic_walks_10000`: GFA1.1 `W` walk records with sample/haplotype metadata
+- `synthetic_containments_10000`: `C` containment records and tags
+- `synthetic_mixed_10000`: tags, valid path/jump transitions, walks and containments together
+
+The feature cases intentionally use one moderate graph size so parser/data-model overhead can be measured without multiplying every 500k/1M scaling run. Change it with `--feature-size`, choose a subset with `--feature-cases`, or reproduce the historical topology-only suite with `--no-feature-cases`.
+
+For example:
+
+```bash
+python3 benchmarks/generate_synthetic.py benchmarks/data-features \
+  --sizes 10000 \
+  --topologies branched \
+  --feature-size 100000 \
+  --feature-cases tags jumps mixed
+```
+
+Synthetic graphs characterize scaling and parser behavior. They should not replace real biological assemblies in the paper.
 
 To stress parser and file-memory behavior with embedded sequence:
 
@@ -83,7 +104,7 @@ python3 benchmarks/run_benchmarks.py benchmarks/config.local.json
 Useful subsets:
 
 ```bash
-python3 benchmarks/run_benchmarks.py benchmarks/config.local.json --tool graphite
+python3 benchmarks/run_benchmarks.py benchmarks/config.local.json --tool graphite-rust
 python3 benchmarks/run_benchmarks.py benchmarks/config.local.json --dataset synthetic_chain_100000
 ```
 
