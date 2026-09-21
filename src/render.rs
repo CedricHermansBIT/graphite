@@ -312,11 +312,10 @@ pub fn draw_gfa_overlays(
                 .segments
                 .get(containment.container)
                 .map_or(1, |segment| segment.length.max(1));
-            let mut fraction =
+            // GFA1 defines C.Pos on the container in its forward
+            // sequence orientation, before ContainerOrient is applied.
+            let fraction =
                 (containment.position as f32 / container_len as f32).clamp(0.0, 1.0);
-            if matches!(containment.container_strand, Strand::Reverse) {
-                fraction = 1.0 - fraction;
-            }
 
             let source = world_to_screen(
                 layout.point_at_fraction(container_node, fraction),
