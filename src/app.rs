@@ -102,6 +102,7 @@ pub struct GfaApp {
     pending_focus_nodes: Option<Vec<usize>>,
     show_filter_panel: bool,
     show_display_panel: bool,
+    show_overlay_panel: bool,
     show_stats_panel: bool,
     show_selection_panel: bool,
     /// Fit screen once on first frame after load.
@@ -143,6 +144,7 @@ impl GfaApp {
             pending_focus_nodes: None,
             show_filter_panel: true,
             show_display_panel: true,
+            show_overlay_panel: true,
             show_stats_panel: true,
             show_selection_panel: true,
             pending_fit: false,
@@ -456,6 +458,7 @@ impl GfaApp {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_filter_panel, "Filter panel");
                     ui.checkbox(&mut self.show_display_panel, "Display panel");
+                    ui.checkbox(&mut self.show_overlay_panel, "GFA overlay panel");
                     ui.checkbox(&mut self.show_stats_panel, "Stats panel");
                     ui.checkbox(&mut self.show_selection_panel, "Selection panel");
                     ui.separator();
@@ -576,15 +579,17 @@ impl GfaApp {
                         }
                         ui.separator();
                     }
-                    if let LoadState::Loaded { gfa, .. } = &self.load_state {
-                        if !gfa.paths.is_empty()
-                            || !gfa.walks.is_empty()
-                            || !gfa.containments.is_empty()
-                        {
-                            if overlays_panel(ui, gfa, &mut self.overlays) {
-                                ctx.request_repaint();
+                    if self.show_overlay_panel {
+                        if let LoadState::Loaded { gfa, .. } = &self.load_state {
+                            if !gfa.paths.is_empty()
+                                || !gfa.walks.is_empty()
+                                || !gfa.containments.is_empty()
+                            {
+                                if overlays_panel(ui, gfa, &mut self.overlays) {
+                                    ctx.request_repaint();
+                                }
+                                ui.separator();
                             }
-                            ui.separator();
                         }
                     }
                     if self.show_stats_panel {
