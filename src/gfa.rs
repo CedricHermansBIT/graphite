@@ -592,8 +592,13 @@ fn detect_gfa_version(bytes: &[u8]) -> GfaVersion {
         if line.last() == Some(&b'\r') {
             line = &line[..line.len() - 1];
         }
-        if line.first() != Some(&b'H') {
+        if line.is_empty() || line.first() == Some(&b'#') {
             continue;
+        }
+        if line.first() != Some(&b'H') {
+            // Header records conventionally precede graph records. Stopping
+            // here avoids a full extra pass over large headerless GFA1 files.
+            break;
         }
         for field in tab_fields(line).skip(1) {
             if field.len() >= 5
