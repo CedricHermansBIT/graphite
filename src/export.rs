@@ -5,7 +5,7 @@ use anyhow::Result;
 use egui::Color32;
 use image::{ImageBuffer, Rgba};
 
-use crate::gfa::GfaGraph;
+use crate::gfa::{GfaGraph, GfaVersion};
 use crate::graph::{EdgeKind, ViewGraph};
 use crate::layout::Layout;
 use crate::render::{color_for_node, RenderParams};
@@ -331,10 +331,14 @@ fn escape_xml(text: &str) -> String {
 
 /// Compute basic assembly statistics.
 pub struct AssemblyStats {
+    pub gfa_version: GfaVersion,
     pub num_segments: usize,
     pub total_length: usize,
-    #[allow(dead_code)]
     pub num_links: usize,
+    pub num_jumps: usize,
+    pub num_containments: usize,
+    pub num_paths: usize,
+    pub num_walks: usize,
     pub n50: usize,
     pub l50: usize,
     pub max_length: usize,
@@ -347,6 +351,10 @@ impl AssemblyStats {
         let segs = &gfa.segments;
         let num_segments = segs.len();
         let num_links = gfa.links.len();
+        let num_jumps = gfa.jumps.len();
+        let num_containments = gfa.containments.len();
+        let num_paths = gfa.paths.len();
+        let num_walks = gfa.walks.len();
         let total_length: usize = segs.iter().map(|s| s.length).sum();
         let max_length = segs.iter().map(|s| s.length).max().unwrap_or(0);
         let min_length = segs.iter().map(|s| s.length).min().unwrap_or(0);
@@ -376,6 +384,20 @@ impl AssemblyStats {
             depth_vals.iter().sum::<f64>() / depth_vals.len() as f64
         };
 
-        Self { num_segments, total_length, num_links, n50, l50, max_length, min_length, mean_depth }
+        Self {
+            gfa_version: gfa.version,
+            num_segments,
+            total_length,
+            num_links,
+            num_jumps,
+            num_containments,
+            num_paths,
+            num_walks,
+            n50,
+            l50,
+            max_length,
+            min_length,
+            mean_depth,
+        }
     }
 }
