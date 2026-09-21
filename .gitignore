@@ -3,3 +3,8 @@
 /benchmarks/data-seq/
 /benchmarks/results/
 /benchmarks/config.local.json
+# Public compatibility corpus (downloaded/generated locally)
+/tests/compatibility/data/
+/tests/compatibility/results/
+/tests/compatibility/datasets.lock.json
+
