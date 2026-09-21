@@ -63,9 +63,12 @@ branching cyclic components are handled by FMMM rather than forced into one ring
 
 In Grab (`G`) mode, click a contig's visible polyline and drag. The cursor keeps
 its original offset and moves the whole contig without stretching it. A circular
-component moves as a unit. Dragging gives immediate visual feedback and restarts
-Rust-side relaxation. Automatic packing stops after manual placement to preserve
-edits; manually placed components may therefore overlap.
+component moves as a unit. While the pointer is held, inter-contig graph-link
+springs are temporarily softened to 35% of their normal stiffness so neighbouring
+contigs follow with some give rather than feeling rigidly tied to the cursor.
+Full spring stiffness returns immediately on release and Rust-side relaxation
+settles the local geometry. Automatic packing stops after manual placement to
+preserve edits; manually placed components may therefore overlap.
 
 Interactive repulsion uses reusable hashed spatial buckets, an actual distance
 cutoff, and queries confined to the same connected component. Settled contigs
