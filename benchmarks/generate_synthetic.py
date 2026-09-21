@@ -224,14 +224,37 @@ def write_graph(
             tag_count += tags
 
         if add_jumps:
-            # Add sparse long-range jump edges. Every fourth jump is explicitly
-            # marked as a shortcut so SC:i:1 is exercised too.
-            for jump_id, left in enumerate(range(0, max(0, segments - 20), 200)):
-                right = min(segments - 1, left + 20)
-                line, tags = jump_line(left, right, jump_id, shortcut=(jump_id % 4 == 0))
-                handle.write(line)
-                jump_count += 1
-                tag_count += tags
+            if add_paths:
+                # For the mixed case, make every semicolon transition in the
+                # generated P records correspond to a real adjacent J record.
+                jump_id = 0
+                for start in range(0, segments, feature_chunk_size):
+                    stop = min(start + feature_chunk_size, segments)
+                    for right in range(start + 10, stop, 10):
+                        left = right - 1
+                        line, tags = jump_line(
+                            left,
+                            right,
+                            jump_id,
+                            shortcut=(jump_id % 4 == 0),
+                        )
+                        handle.write(line)
+                        jump_count += 1
+                        tag_count += tags
+                        jump_id += 1
+            else:
+                # The jump-only case uses sparse long-range connections.
+                for jump_id, left in enumerate(range(0, max(0, segments - 20), 200)):
+                    right = min(segments - 1, left + 20)
+                    line, tags = jump_line(
+                        left,
+                        right,
+                        jump_id,
+                        shortcut=(jump_id % 4 == 0),
+                    )
+                    handle.write(line)
+                    jump_count += 1
+                    tag_count += tags
 
         if add_containments:
             for containment_id, contained in enumerate(range(1, segments, 200)):
