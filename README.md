@@ -95,6 +95,8 @@ Generate the default synthetic datasets:
 python3 benchmarks/generate_synthetic.py
 ```
 
+This creates the original topology-scaling suite plus dedicated 10k-segment cases for optional tags, `J` jumps, `P` paths, `W` walks, `C` containments and a mixed GFA1.2 case.
+
 Run a serial publication benchmark:
 
 ```bash
