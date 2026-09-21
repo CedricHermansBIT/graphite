@@ -40,7 +40,7 @@ Graphite currently targets GFA1. Header version tags are parsed and genuine GFA2
 
 Optional fields are stored in a generic zero-copy tag table, so standard or producer-specific tags can be retained even when Graphite does not assign them dedicated UI behavior.
 
-`P` paths and `W` walks can be selected from the GFA overlays panel and are drawn as oriented overlays on the current graph. `C` containments can be shown as dotted connectors attached at their recorded internal container position. Active overlays are preserved in interactive SVG/PNG figure exports. Containments are deliberately not converted to ordinary endpoint links because their attachment position may lie inside the container segment.
+`P` paths and `W` walks can be selected from the GFA overlays panel, drawn as oriented overlays on the current graph, focused in the viewport, or converted directly into a segment selection. `C` containments can be shown as dotted connectors attached at their recorded internal container position. Active overlays are preserved in interactive SVG/PNG figure exports. Containments are deliberately not converted to ordinary endpoint links because their attachment position may lie inside the container segment.
 
 GFA2 `S/E/F/G/O/U` records are not implemented yet.
 
