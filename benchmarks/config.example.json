@@ -1,0 +1,41 @@
+{
+  "repetitions": 5,
+  "warmups": 1,
+  "timeout_seconds": 900,
+  "sample_interval_ms": 50,
+  "tools": [
+    {
+      "name": "graphite",
+      "command": [
+        "./target/release/graphite",
+        "--benchmark",
+        "--benchmark-steps",
+        "0",
+        "--benchmark-output",
+        "{output}",
+        "{input}"
+      ],
+      "parse_json": true
+    },
+    {
+      "name": "bandage",
+      "command": ["Bandage", "image", "{input}", "{output}"],
+      "version_command": ["Bandage", "--version"]
+    },
+    {
+      "name": "bandage-ng",
+      "command": ["BandageNG", "image", "{input}", "{output}"],
+      "version_command": ["BandageNG", "--version"]
+    }
+  ],
+  "datasets": [
+    {
+      "name": "replace_with_real_assembly",
+      "path": "/absolute/path/to/assembly.gfa",
+      "kind": "real"
+    }
+  ],
+  "dataset_manifests": [
+    "benchmarks/data/manifest.json"
+  ]
+}
