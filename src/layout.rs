@@ -158,6 +158,7 @@ impl Layout {
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
+    #[cfg(test)]
     pub fn new_with_graph(graph: &ViewGraph) -> Self {
         Self::new_with_graph_backend(graph, LayoutBackend::Bandage)
     }
@@ -1003,10 +1004,6 @@ pub struct LayoutRunner {
 }
 
 impl LayoutRunner {
-    pub fn start(graph: Arc<ViewGraph>, params: LayoutParams) -> Self {
-        Self::start_with_backend(graph, params, LayoutBackend::Bandage)
-    }
-
     pub fn start_with_backend(
         graph: Arc<ViewGraph>,
         params: LayoutParams,
