@@ -398,6 +398,163 @@ pub fn display_panel(ui: &mut Ui, opts: &mut DisplayOptions) -> bool {
     changed
 }
 
+// ── GFA metadata overlays ────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct OverlayOptions {
+    pub selected_path: Option<usize>,
+    pub selected_walk: Option<usize>,
+    pub show_containments: bool,
+    pub path_query: String,
+    pub walk_query: String,
+}
+
+pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) -> bool {
+    let mut changed = false;
+    panel_header(
+        ui,
+        "GFA overlays",
+        "Highlight paths, haplotype walks and containment relationships.",
+    );
+
+    if !gfa.containments.is_empty() {
+        section(ui, "Containments", |ui| {
+            changed |= ui
+                .checkbox(
+                    &mut opts.show_containments,
+                    format!("Show {} containments", gfa.containments.len()),
+                )
+                .changed();
+            hint(
+                ui,
+                "Dotted connectors attach at the recorded position inside the container segment.",
+            );
+        });
+        ui.add_space(8.0);
+    }
+
+    if !gfa.paths.is_empty() {
+        section(ui, "Path overlay", |ui| {
+            if let Some(index) = opts.selected_path {
+                if let Some(path) = gfa.paths.get(index) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(path.name.as_ref()).strong());
+                        if ui.small_button("Clear").clicked() {
+                            opts.selected_path = None;
+                            changed = true;
+                        }
+                    });
+                    hint(
+                        ui,
+                        &format!("{} oriented steps", path.steps.len()),
+                    );
+                    ui.add_space(5.0);
+                }
+            }
+
+            ui.add(
+                egui::TextEdit::singleline(&mut opts.path_query)
+                    .hint_text("Filter path names…"),
+            );
+            let query = opts.path_query.trim().to_ascii_lowercase();
+            let matches: Vec<_> = gfa
+                .paths
+                .iter()
+                .enumerate()
+                .filter(|(_, path)| {
+                    query.is_empty() || path.name.to_ascii_lowercase().contains(&query)
+                })
+                .take(20)
+                .collect();
+
+            ScrollArea::vertical().max_height(145.0).show(ui, |ui| {
+                for (index, path) in matches {
+                    if ui
+                        .selectable_label(
+                            opts.selected_path == Some(index),
+                            format!("{}  ·  {} steps", path.name, path.steps.len()),
+                        )
+                        .clicked()
+                    {
+                        opts.selected_path = Some(index);
+                        changed = true;
+                    }
+                }
+            });
+            hint(ui, "Showing up to 20 matches. Type part of a name to narrow the list.");
+        });
+        ui.add_space(8.0);
+    }
+
+    if !gfa.walks.is_empty() {
+        section(ui, "Walk overlay", |ui| {
+            if let Some(index) = opts.selected_walk {
+                if let Some(walk) = gfa.walks.get(index) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(walk_label(walk)).strong());
+                        if ui.small_button("Clear").clicked() {
+                            opts.selected_walk = None;
+                            changed = true;
+                        }
+                    });
+                    hint(ui, &format!("{} oriented steps", walk.steps.len()));
+                    ui.add_space(5.0);
+                }
+            }
+
+            ui.add(
+                egui::TextEdit::singleline(&mut opts.walk_query)
+                    .hint_text("Filter sample / sequence…"),
+            );
+            let query = opts.walk_query.trim().to_ascii_lowercase();
+            let matches: Vec<_> = gfa
+                .walks
+                .iter()
+                .enumerate()
+                .filter(|(_, walk)| {
+                    if query.is_empty() {
+                        true
+                    } else {
+                        walk.sample_id.to_ascii_lowercase().contains(&query)
+                            || walk.sequence_id.to_ascii_lowercase().contains(&query)
+                            || walk.haplotype_index.to_string().contains(&query)
+                    }
+                })
+                .take(20)
+                .collect();
+
+            ScrollArea::vertical().max_height(145.0).show(ui, |ui| {
+                for (index, walk) in matches {
+                    if ui
+                        .selectable_label(
+                            opts.selected_walk == Some(index),
+                            format!("{}  ·  {} steps", walk_label(walk), walk.steps.len()),
+                        )
+                        .clicked()
+                    {
+                        opts.selected_walk = Some(index);
+                        changed = true;
+                    }
+                }
+            });
+            hint(ui, "Showing up to 20 matches. Search by sample, haplotype or sequence.");
+        });
+    }
+
+    changed
+}
+
+fn walk_label(walk: &crate::gfa::Walk) -> String {
+    let coordinates = match (walk.sequence_start, walk.sequence_end) {
+        (Some(start), Some(end)) => format!(":{start}-{end}"),
+        _ => String::new(),
+    };
+    format!(
+        "{} · h{} · {}{}",
+        walk.sample_id, walk.haplotype_index, walk.sequence_id, coordinates
+    )
+}
+
 // ── Stats Panel ───────────────────────────────────────────────────────────────
 
 pub fn stats_panel(ui: &mut Ui, stats: &AssemblyStats, view_graph: &ViewGraph) {
