@@ -400,6 +400,14 @@ pub fn display_panel(ui: &mut Ui, opts: &mut DisplayOptions) -> bool {
 
 // ── GFA metadata overlays ────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayAction {
+    FocusPath(usize),
+    SelectPath(usize),
+    FocusWalk(usize),
+    SelectWalk(usize),
+}
+
 #[derive(Default)]
 pub struct OverlayOptions {
     pub selected_path: Option<usize>,
@@ -409,8 +417,13 @@ pub struct OverlayOptions {
     pub walk_query: String,
 }
 
-pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) -> bool {
+pub fn overlays_panel(
+    ui: &mut Ui,
+    gfa: &GfaGraph,
+    opts: &mut OverlayOptions,
+) -> (bool, Option<OverlayAction>) {
     let mut changed = false;
+    let mut action = None;
     panel_header(
         ui,
         "GFA overlays",
@@ -444,10 +457,15 @@ pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) ->
                             changed = true;
                         }
                     });
-                    hint(
-                        ui,
-                        &format!("{} oriented steps", path.steps.len()),
-                    );
+                    hint(ui, &format!("{} oriented steps", path.steps.len()));
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Focus").clicked() {
+                            action = Some(OverlayAction::FocusPath(index));
+                        }
+                        if ui.small_button("Select segments").clicked() {
+                            action = Some(OverlayAction::SelectPath(index));
+                        }
+                    });
                     ui.add_space(5.0);
                 }
             }
@@ -498,6 +516,14 @@ pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) ->
                         }
                     });
                     hint(ui, &format!("{} oriented steps", walk.steps.len()));
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Focus").clicked() {
+                            action = Some(OverlayAction::FocusWalk(index));
+                        }
+                        if ui.small_button("Select segments").clicked() {
+                            action = Some(OverlayAction::SelectWalk(index));
+                        }
+                    });
                     ui.add_space(5.0);
                 }
             }
@@ -541,7 +567,7 @@ pub fn overlays_panel(ui: &mut Ui, gfa: &GfaGraph, opts: &mut OverlayOptions) ->
         });
     }
 
-    changed
+    (changed, action)
 }
 
 fn walk_label(walk: &crate::gfa::Walk) -> String {
