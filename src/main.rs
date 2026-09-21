@@ -34,6 +34,10 @@ struct Args {
     #[argh(option, default = "String::from(\"bandage\")")]
     layout_backend: String,
 
+    /// reduce continuous UI updates for SSH/X11 forwarding
+    #[argh(switch)]
+    remote_ui: bool,
+
     /// GFA file to open on startup
     #[argh(positional)]
     file: Option<String>,
@@ -170,7 +174,12 @@ fn main() -> Result<()> {
         "Graphite",
         native_options,
         Box::new(move |cc| {
-            Ok(Box::new(app::GfaApp::new(cc, args.file, backend)) as Box<dyn eframe::App>)
+            Ok(Box::new(app::GfaApp::new(
+                cc,
+                args.file,
+                backend,
+                args.remote_ui,
+            )) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {e}"))
