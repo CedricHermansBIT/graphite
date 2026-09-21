@@ -148,6 +148,12 @@ fn main() -> Result<()> {
         );
     }
 
+    let backend = layout::LayoutBackend::parse(&args.layout_backend)
+        .with_context(|| format!(
+            "unknown layout backend '{}'; expected 'bandage' or 'rust'",
+            args.layout_backend
+        ))?;
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Graphite")
@@ -163,7 +169,9 @@ fn main() -> Result<()> {
     eframe::run_native(
         "Graphite",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::GfaApp::new(cc, args.file)) as Box<dyn eframe::App>)),
+        Box::new(move |cc| {
+            Ok(Box::new(app::GfaApp::new(cc, args.file, backend)) as Box<dyn eframe::App>)
+        }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {e}"))
 }
