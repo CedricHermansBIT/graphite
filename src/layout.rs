@@ -148,6 +148,48 @@ impl Layout {
         }
     }
 
+    /// Position at a fractional distance along the displayed segment polyline.
+    ///
+    /// This follows the current drawn geometry rather than assuming physics
+    /// points stayed evenly spaced after layout/dragging.
+    pub fn point_at_fraction(&self, ni: usize, fraction: f32) -> Pos2 {
+        let points = self.pts(ni);
+        if points.is_empty() {
+            return [0.0, 0.0];
+        }
+        if points.len() == 1 {
+            return points[0];
+        }
+
+        let fraction = fraction.clamp(0.0, 1.0);
+        let mut total = 0.0_f32;
+        for pair in points.windows(2) {
+            let dx = pair[1][0] - pair[0][0];
+            let dy = pair[1][1] - pair[0][1];
+            total += (dx * dx + dy * dy).sqrt();
+        }
+        if total <= f32::EPSILON {
+            return points[0];
+        }
+
+        let target = fraction * total;
+        let mut travelled = 0.0_f32;
+        for pair in points.windows(2) {
+            let dx = pair[1][0] - pair[0][0];
+            let dy = pair[1][1] - pair[0][1];
+            let segment = (dx * dx + dy * dy).sqrt();
+            if travelled + segment >= target && segment > f32::EPSILON {
+                let t = ((target - travelled) / segment).clamp(0.0, 1.0);
+                return [
+                    pair[0][0] + dx * t,
+                    pair[0][1] + dy * t,
+                ];
+            }
+            travelled += segment;
+        }
+        *points.last().unwrap()
+    }
+
     /// Slice of all physics-node positions belonging to segment `ni`.
     #[inline]
     pub fn pts(&self, ni: usize) -> &[Pos2] {
