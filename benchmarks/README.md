@@ -11,9 +11,20 @@ Use the end-to-end values for the main cross-tool comparison. Use Graphite's int
 
 ## Build Graphite
 
+For Graphite-only benchmarks using the default Rust backend:
+
 ```bash
 cargo build --release
 ```
+
+To run the full comparison including Graphite's bundled Bandage/OGDF reference backend:
+
+```bash
+git submodule update --init Bandage
+cargo build --release --features ogdf
+```
+
+The normal Rust-only build does not require the Bandage submodule or a C++ compiler.
 
 Graphite now has a headless benchmark mode:
 
