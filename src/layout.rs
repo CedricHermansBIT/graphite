@@ -7,6 +7,7 @@ use crate::rust_layout;
 
 pub type Pos2 = [f32; 2];
 
+#[cfg(feature = "ogdf")]
 unsafe extern "C" {
     fn bandage_initial_layout(
         count: usize,
@@ -74,6 +75,7 @@ const DRAG_FALLOFF_STRENGTH: f32 = 100.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutBackend {
+    #[cfg(feature = "ogdf")]
     Bandage,
     Rust,
 }
@@ -81,6 +83,7 @@ pub enum LayoutBackend {
 impl LayoutBackend {
     pub fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
+            #[cfg(feature = "ogdf")]
             "bandage" | "ogdf" => Some(Self::Bandage),
             "rust" => Some(Self::Rust),
             _ => None,
@@ -89,6 +92,7 @@ impl LayoutBackend {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            #[cfg(feature = "ogdf")]
             Self::Bandage => "bandage",
             Self::Rust => "rust",
         }
@@ -235,7 +239,7 @@ impl Layout {
 
     #[cfg(test)]
     pub fn new_with_graph(graph: &ViewGraph) -> Self {
-        Self::new_with_graph_backend(graph, LayoutBackend::Bandage)
+        Self::new_with_graph_backend(graph, LayoutBackend::Rust)
     }
 
     pub fn new_with_graph_backend(graph: &ViewGraph, backend: LayoutBackend) -> Self {
@@ -545,6 +549,7 @@ impl Layout {
             converged: false,
         };
         layout.converged = match backend {
+            #[cfg(feature = "ogdf")]
             LayoutBackend::Bandage => layout.seed_with_bandage(graph),
             LayoutBackend::Rust => layout.seed_with_rust(graph),
         };
@@ -554,6 +559,7 @@ impl Layout {
 
     /// Use Bandage's bundled OGDF FMMM implementation on connected, non-ring
     /// polylines. Isolated contigs and explicit circles need no force solve.
+    #[cfg(feature = "ogdf")]
     fn seed_with_bandage(&mut self, graph: &ViewGraph) -> bool {
         if self.active_points.is_empty() {
             return true;
@@ -1485,6 +1491,7 @@ mod tests {
         assert_eq!(layout.iteration, 5);
     }
 
+    #[cfg(feature = "ogdf")]
     #[test]
     fn bandage_initialization_is_settled() {
         use Strand::Forward as F;
@@ -1498,7 +1505,7 @@ mod tests {
                 (3, F, 4, F),
             ],
         );
-        let layout = Layout::new_with_graph(&graph);
+        let layout = Layout::new_with_graph_backend(&graph, LayoutBackend::Bandage);
         assert!(!layout.active_points.is_empty());
         assert!(
             layout.converged,
