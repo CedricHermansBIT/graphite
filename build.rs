@@ -1,4 +1,10 @@
 fn main() {
+    #[cfg(feature = "ogdf")]
+    build_ogdf();
+}
+
+#[cfg(feature = "ogdf")]
+fn build_ogdf() {
     println!("cargo:rerun-if-changed=Bandage/ogdf");
     println!("cargo:rerun-if-changed=Bandage/Bandage.pro");
     println!("cargo:rerun-if-changed=native");
