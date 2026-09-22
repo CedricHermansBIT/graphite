@@ -47,7 +47,8 @@ GFA2 `S/E/F/G/O/U` records are not implemented yet.
 ## Requirements
 
 - Rust stable with Rust 2024 edition support (Rust 1.85 or newer). Update with `rustup update stable`.
-- A C++14 compiler; it builds the bundled Bandage OGDF layout bridge.
+- The default Rust-only build does **not** require the Bandage submodule or a C++ compiler.
+- The optional Bandage/OGDF reference backend requires the `Bandage` submodule and a C++14 compiler.
 
 On Debian/Ubuntu, install the native windowing libraries before building:
 
@@ -64,12 +65,23 @@ cargo build --release
 
 The file argument is optional: without it, use **File → Open GFA…**.
 
-The Rust backend is the default. Select a backend explicitly when comparing implementations:
+The Rust backend is the default and is the only backend in a normal build.
+
+To include the Bandage/OGDF reference backend for validation or benchmarking, initialize the submodule and enable the `ogdf` feature:
+
+```bash
+git submodule update --init Bandage
+cargo build --release --features ogdf
+```
+
+The resulting binary supports both selectors:
 
 ```bash
 ./target/release/graphite --layout-backend rust path/to/assembly.gfa
 ./target/release/graphite --layout-backend bandage path/to/assembly.gfa
 ```
+
+Requesting `--layout-backend bandage` from a Rust-only build prints an error explaining that Graphite must be rebuilt with `--features ogdf`.
 
 For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and repaint traffic:
 
@@ -77,14 +89,20 @@ For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and rep
 ./target/release/graphite --remote-ui --layout-backend rust path/to/assembly.gfa
 ```
 
-To create the Windows release executable from Linux/WSL:
+To create the default Rust-only Windows release executable from Linux/WSL:
 
 ```bash
 cargo xwin build --release --target x86_64-pc-windows-msvc
 ./target/x86_64-pc-windows-msvc/release/graphite.exe path/to/assembly.gfa
 ```
 
-`build.rs` supplies an `llvm-lib` compatibility wrapper for `cargo-xwin`, so a separately installed `llvm-lib` is not required.
+The optional OGDF-enabled Windows build uses:
+
+```bash
+cargo xwin build --release --features ogdf --target x86_64-pc-windows-msvc
+```
+
+For the OGDF-enabled target, `build.rs` supplies an `llvm-lib` compatibility wrapper for `cargo-xwin`, so a separately installed `llvm-lib` is not required.
 
 ## Benchmarking
 
@@ -185,7 +203,7 @@ src/
 native/
   bandage_layout.cpp  bridge to bundled Bandage OGDF layout code
 Bandage/
-  bundled Bandage and OGDF source used by the reference layout backend
+  optional submodule: Bandage and OGDF source used only with --features ogdf
 benchmarks/
   benchmark runner, synthetic datasets, summaries and plotting utilities
 assets/
