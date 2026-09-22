@@ -71,7 +71,7 @@ python3 tests/compatibility/run_compatibility.py run \
   --backend rust
 ~~~
 
-If `target/release/graphite` does not exist, the script runs `cargo build --release` automatically. Use `--no-build` to disable that behavior.
+If `target/release/graphite` does not exist, the script runs `cargo build --release` automatically for the Rust backend. With `--backend bandage`, it builds with `--features ogdf`. Use `--no-build` to disable that behavior.
 
 Results are written to `tests/compatibility/results/compatibility.jsonl` and `tests/compatibility/results/summary.json`.
 
