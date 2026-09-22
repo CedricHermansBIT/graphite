@@ -55,6 +55,11 @@ const DRAG_REPULSION_SCALE: f32 = 0.55;
 /// feel stuck.
 const DRAG_DAMPING_SCALE: f32 = 0.75;
 
+/// Unlike the normal relaxation pass, an active drag must not cool down over
+/// time. Otherwise a long drag eventually leaves linked segments almost fixed
+/// in place while the grabbed contig keeps moving away.
+const DRAG_MOVE_LIMIT_SCALE: f32 = 0.85;
+
 /// Bandage's "nearby pieces" drag uses an index-distance falloff with a default
 /// strength of 100. Use the same curve for the dragged contig so it bends around
 /// the grabbed point instead of translating as a rigid polyline.
@@ -828,10 +833,17 @@ impl Layout {
             return;
         }
         let k = AREA_PER_NODE.sqrt();
-        // Limit early motion to preserve the topology-aware initial placement.
+        // Normal relaxation cools over time to settle the graph. During an
+        // active grab, keep a larger non-decaying movement allowance so linked
+        // segments can continue following even after a long or very large drag.
         let t0 = k * 0.25;
-        let progress = (self.iteration as f32 / params.max_iter.max(1) as f32).clamp(0.0, 1.0);
-        let temp = t0 * (-5.0 * progress).exp().max(0.01);
+        let progress =
+            (self.iteration as f32 / params.max_iter.max(1) as f32).clamp(0.0, 1.0);
+        let temp = if attractor.is_some() {
+            k * DRAG_MOVE_LIMIT_SCALE
+        } else {
+            t0 * (-5.0 * progress).exp().max(0.01)
+        };
 
         let k2 = k * k;
         // cell_size = query_r so each query only checks 3×3 = 9 cells (was 15×15=225).
@@ -1341,6 +1353,36 @@ mod tests {
         assert!(
             end_move < grabbed_move,
             "drag falloff should let the grabbed contig bend instead of translating rigidly"
+        );
+    }
+
+    #[test]
+    fn linked_segments_keep_following_during_long_far_drag() {
+        use Strand::Forward as F;
+        let graph = graph(&[1200.0, 1200.0, 1200.0], &[(0, F, 1, F), (1, F, 2, F)]);
+        let mut layout = Layout::new_with_graph(&graph);
+
+        let grabbed = layout.node_pts_start[0] + layout.node_pts_count[0] - 1;
+        let follower_before = layout.center(2);
+        let target = [
+            layout.positions[grabbed][0] + 20_000.0,
+            layout.positions[grabbed][1] + 4_000.0,
+        ];
+
+        // Keep holding the same far-away target long enough that the normal
+        // relaxation temperature would have cooled almost completely.
+        for _ in 0..200 {
+            layout.step(&graph, &LayoutParams::default(), Some((target, grabbed)));
+        }
+
+        let follower_after = layout.center(2);
+        let follower_move = (follower_after[0] - follower_before[0])
+            .hypot(follower_after[1] - follower_before[1]);
+
+        assert_eq!(layout.positions[grabbed], target);
+        assert!(
+            follower_move > 5_000.0,
+            "linked segments should continue following a long drag; moved only {follower_move}"
         );
     }
 
