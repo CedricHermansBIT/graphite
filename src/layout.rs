@@ -58,7 +58,7 @@ const DRAG_DAMPING_SCALE: f32 = 0.75;
 /// If a node's drag force reverses direction between consecutive iterations,
 /// damp that corrective step heavily. This suppresses branch-point chatter
 /// without slowing followers that are still moving consistently toward the drag.
-const DRAG_REVERSAL_DAMPING_SCALE: f32 = 0.22;
+const DRAG_REVERSAL_DAMPING_SCALE: f32 = 0.10;
 
 /// Unlike the normal relaxation pass, an active drag must not cool down over
 /// time. Otherwise a long drag eventually leaves linked segments almost fixed
