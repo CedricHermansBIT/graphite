@@ -2,7 +2,7 @@
 
 ## Rust initial layout backend
 
-Graphite uses a Graphite-specific Rust implementation as its default initial-layout backend. The native Bandage/OGDF FMMM bridge remains available as a reference backend for validation, benchmarking and reproducibility.
+Graphite uses a Graphite-specific Rust implementation as its default initial-layout backend. The native Bandage/OGDF FMMM bridge is an optional Cargo feature used as a reference backend for validation, benchmarking and reproducibility.
 
 Both backends receive the same reduced Graphite representation. For graphs above 100,000 active physics points, each contig is represented by its two endpoints and full visual length; intermediate render points are interpolated after layout. Circular components and isolated contigs bypass the general solver.
 
@@ -90,20 +90,36 @@ Normal mode publishes layout snapshots and requests animation repaints about eve
 
 ## Building
 
-A C++14 compiler is now required in addition to the Rust toolchain. `build.rs`
-compiles the existing Bandage OGDF source into a static library. Qt is not needed:
+The default build is Rust-only:
+
+```bash
+cargo build --release
+```
+
+It does not access the `Bandage` submodule and does not require a C++ compiler.
+
+The Bandage/OGDF reference backend is opt-in:
+
+```bash
+git submodule update --init Bandage
+cargo build --release --features ogdf
+```
+
+Only when the `ogdf` feature is enabled does `build.rs` compile the Bandage
+OGDF source into a static library. Qt is not needed:
 `native/qt_geometry` supplies only the point and segment-intersection operations
-used by Bandage's split untangler. The bundled source and its license notices
+used by Bandage's split untangler. The submodule source and its license notices
 remain intact; see `Bandage/ogdf/LICENSE.txt` and the Bandage source headers.
 
-The existing Linux-to-Windows command remains supported:
+The default Linux-to-Windows build is likewise Rust-only:
 
 ```bash
 cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
-For this target, the build script wraps Rust's bundled `lld-link` in LLVM
-librarian mode. A separately installed `llvm-lib` executable is not required.
+To include OGDF, add `--features ogdf`. For that target, the build script wraps
+Rust's bundled `lld-link` in LLVM librarian mode. A separately installed
+`llvm-lib` executable is not required.
 
 ## Checks
 
