@@ -55,10 +55,10 @@ const DRAG_REPULSION_SCALE: f32 = 0.55;
 /// feel stuck.
 const DRAG_DAMPING_SCALE: f32 = 0.75;
 
-/// If a node's drag force reverses direction between consecutive iterations,
-/// damp that corrective step heavily. This suppresses branch-point chatter
-/// without slowing followers that are still moving consistently toward the drag.
-const DRAG_REVERSAL_DAMPING_SCALE: f32 = 0.10;
+/// Low-pass the force during an active grab. Branch points can receive strong
+/// competing spring forces; blending consecutive forces prevents those forces
+/// from flipping direction abruptly while keeping sustained motion responsive.
+const DRAG_FORCE_SMOOTHING: f32 = 0.35;
 
 /// Unlike the normal relaxation pass, an active drag must not cool down over
 /// time. Otherwise a long drag eventually leaves linked segments almost fixed
@@ -131,8 +131,9 @@ pub struct Layout {
     /// Reusable displacement buffer — zeroed at the start of each step.
     disp: Vec<Pos2>,
 
-    /// Previous raw force while dragging. Used only to detect direction
-    /// reversals and suppress oscillation at highly connected branch points.
+    /// Low-pass filtered drag force from the previous iteration. This smooths
+    /// competing spring directions at branch points without reducing the
+    /// long-range pull on connected segments.
     prev_drag_force: Vec<Pos2>,
 
     revision: usize,
@@ -988,21 +989,21 @@ impl Layout {
             }
             let raw_dx = self.disp[pi][0];
             let raw_dy = self.disp[pi][1];
-            let damping = if attractor.is_some() {
+            let (dx, dy) = if attractor.is_some() {
                 let previous = self.prev_drag_force[pi];
-                let reversing = raw_dx * previous[0] + raw_dy * previous[1] < 0.0;
-                self.prev_drag_force[pi] = [raw_dx, raw_dy];
-                if reversing {
-                    DRAG_DAMPING_SCALE * DRAG_REVERSAL_DAMPING_SCALE
-                } else {
-                    DRAG_DAMPING_SCALE
-                }
+                let filtered = [
+                    previous[0] + (raw_dx - previous[0]) * DRAG_FORCE_SMOOTHING,
+                    previous[1] + (raw_dy - previous[1]) * DRAG_FORCE_SMOOTHING,
+                ];
+                self.prev_drag_force[pi] = filtered;
+                (
+                    filtered[0] * DRAG_DAMPING_SCALE,
+                    filtered[1] * DRAG_DAMPING_SCALE,
+                )
             } else {
                 self.prev_drag_force[pi] = [0.0, 0.0];
-                1.0
+                (raw_dx, raw_dy)
             };
-            let dx = raw_dx * damping;
-            let dy = raw_dy * damping;
             let d = (dx * dx + dy * dy).sqrt().max(0.001);
             let clamped = d.min(temp);
             self.positions[pi][0] += dx / d * clamped;
@@ -1380,20 +1381,19 @@ mod tests {
     }
 
     #[test]
-    fn drag_force_reversal_is_damped() {
-        let graph = graph(&[1200.0, 1200.0], &[]);
-        let mut layout = Layout::new_with_graph(&graph);
-        let pi = layout.node_pts_start[0];
-        layout.prev_drag_force[pi] = [100.0, 0.0];
-        layout.disp[pi] = [-100.0, 0.0];
+    fn drag_force_filter_smooths_direction_reversal() {
+        let previous = [100.0_f32, 0.0];
+        let raw = [-100.0_f32, 0.0];
+        let filtered = [
+            previous[0] + (raw[0] - previous[0]) * DRAG_FORCE_SMOOTHING,
+            previous[1] + (raw[1] - previous[1]) * DRAG_FORCE_SMOOTHING,
+        ];
 
-        let raw_dx = layout.disp[pi][0];
-        let raw_dy = layout.disp[pi][1];
-        let previous = layout.prev_drag_force[pi];
-        let reversing = raw_dx * previous[0] + raw_dy * previous[1] < 0.0;
-        assert!(reversing);
-        let damped = raw_dx * DRAG_DAMPING_SCALE * DRAG_REVERSAL_DAMPING_SCALE;
-        assert!(damped.abs() < raw_dx.abs() * 0.2);
+        assert!(
+            filtered[0] > 0.0,
+            "one opposing sample should not immediately flip the filtered force"
+        );
+        assert!(filtered[0].abs() < previous[0].abs());
     }
 
     #[test]
