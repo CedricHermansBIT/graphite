@@ -42,10 +42,23 @@ const SPRING_BEND: f32 = 0.45;
 /// Stiffness for graph-link springs — deliberately weak so repulsion can compete.
 const SPRING_LINK: f32 = 0.05;
 
-/// Graph-link springs are softened while a contig is actively grabbed so
-/// neighbouring contigs follow with some give instead of feeling rigidly tied
-/// to the cursor. Full stiffness returns immediately after release.
-const DRAG_LINK_SPRING_SCALE: f32 = 0.35;
+/// During an active grab, linked contigs should follow the dragged segment
+/// instead of remaining visually anchored to their previous positions.
+const DRAG_LINK_SPRING_SCALE: f32 = 3.0;
+
+/// Reduce near-field repulsion while dragging so attraction can pull connected
+/// segments along without the component immediately pushing itself apart.
+const DRAG_REPULSION_SCALE: f32 = 0.55;
+
+/// Extra damping during a grab. This scales each non-pinned displacement before
+/// the normal temperature clamp, reducing oscillation without making followers
+/// feel stuck.
+const DRAG_DAMPING_SCALE: f32 = 0.75;
+
+/// Bandage's "nearby pieces" drag uses an index-distance falloff with a default
+/// strength of 100. Use the same curve for the dragged contig so it bends around
+/// the grabbed point instead of translating as a rigid polyline.
+const DRAG_FALLOFF_STRENGTH: f32 = 100.0;
 
 // ── Layout ───────────────────────────────────────────────────────────────────
 
@@ -759,17 +772,31 @@ impl Layout {
             pos[0] - self.positions[pi][0],
             pos[1] - self.positions[pi][1],
         ];
-        let nodes = if self.circular[ci] {
-            self.components[ci].as_slice()
+        if self.circular[ci] {
+            // Keep explicit circular assemblies intact when they are moved.
+            for &node in &self.components[ci] {
+                for p in &mut self.positions
+                    [self.node_pts_start[node]..self.node_pts_start[node] + self.node_pts_count[node]]
+                {
+                    p[0] += delta[0];
+                    p[1] += delta[1];
+                }
+            }
         } else {
-            std::slice::from_ref(&v)
-        };
-        for &node in nodes {
-            for p in &mut self.positions
-                [self.node_pts_start[node]..self.node_pts_start[node] + self.node_pts_count[node]]
-            {
-                p[0] += delta[0];
-                p[1] += delta[1];
+            // Match Bandage's "nearby pieces" feel: the grabbed physics point
+            // follows the cursor exactly, while progressively more distant
+            // points on the same contig move by less. The force step below then
+            // lets the polyline flex and settle naturally.
+            let start = self.node_pts_start[v];
+            let count = self.node_pts_count[v];
+            let grabbed_chain_idx = pi - start;
+            for j in 0..count {
+                let index_distance = j.abs_diff(grabbed_chain_idx) as f32;
+                let drag_strength =
+                    2.0_f32.powf(-index_distance.powf(1.8) / DRAG_FALLOFF_STRENGTH);
+                let p = &mut self.positions[start + j];
+                p[0] += delta[0] * drag_strength;
+                p[1] += delta[1] * drag_strength;
             }
         }
     }
@@ -873,8 +900,13 @@ impl Layout {
                     if dist2 > query_r * query_r {
                         return;
                     }
-                    dpv[0] += k2 * dx / dist2;
-                    dpv[1] += k2 * dy / dist2;
+                    let repulsion_scale = if attractor.is_some() {
+                        DRAG_REPULSION_SCALE
+                    } else {
+                        1.0
+                    };
+                    dpv[0] += repulsion_scale * k2 * dx / dist2;
+                    dpv[1] += repulsion_scale * k2 * dy / dist2;
                 });
             });
 
@@ -927,13 +959,16 @@ impl Layout {
             {
                 continue;
             }
-            if attractor
-                .is_some_and(|(_, grabbed)| self.phys_to_node[pi] == self.phys_to_node[grabbed])
-            {
+            if attractor.is_some_and(|(_, grabbed)| pi == grabbed) {
                 continue;
             }
-            let dx = self.disp[pi][0];
-            let dy = self.disp[pi][1];
+            let damping = if attractor.is_some() {
+                DRAG_DAMPING_SCALE
+            } else {
+                1.0
+            };
+            let dx = self.disp[pi][0] * damping;
+            let dy = self.disp[pi][1] * damping;
             let d = (dx * dx + dy * dy).sqrt().max(0.001);
             let clamped = d.min(temp);
             self.positions[pi][0] += dx / d * clamped;
@@ -1286,20 +1321,27 @@ mod tests {
     }
 
     #[test]
-    fn dragging_preserves_shape_and_pins_target() {
-        use Strand::Forward as F;
-        let graph = graph(&[2000.0, 300.0], &[(0, F, 1, F)]);
+    fn dragging_pins_target_and_flexes_contig() {
+        let graph = graph(&[4000.0], &[]);
         let mut layout = Layout::new_with_graph(&graph);
         let before = layout.pts(0).to_vec();
-        let pi = layout.node_pts_start[0] + 2;
-        let target = [1000.0, 400.0];
+        let start = layout.node_pts_start[0];
+        let pi = start + layout.node_pts_count[0] / 2;
+        let target = [layout.positions[pi][0] + 500.0, layout.positions[pi][1] + 250.0];
         layout.step(&graph, &LayoutParams::default(), Some((target, pi)));
+
         assert_eq!(layout.positions[pi], target);
-        for (a, b) in before.windows(2).zip(layout.pts(0).windows(2)) {
-            for d in 0..2 {
-                assert!(((a[1][d] - a[0][d]) - (b[1][d] - b[0][d])).abs() < 0.01);
-            }
-        }
+
+        let grabbed_move = (layout.positions[pi][0] - before[pi - start][0])
+            .hypot(layout.positions[pi][1] - before[pi - start][1]);
+        let end_move = (layout.positions[start][0] - before[0][0])
+            .hypot(layout.positions[start][1] - before[0][1]);
+
+        assert!(end_move > 0.0, "the rest of the contig should follow the grab");
+        assert!(
+            end_move < grabbed_move,
+            "drag falloff should let the grabbed contig bend instead of translating rigidly"
+        );
     }
 
     /// Opt-in benchmark against a local assembly, without opening a GUI.
