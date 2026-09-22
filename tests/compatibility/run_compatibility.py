@@ -353,15 +353,18 @@ def git_commit() -> str | None:
         return None
 
 
-def ensure_graphite(binary: Path, no_build: bool) -> Path:
+def ensure_graphite(binary: Path, no_build: bool, backend: str) -> Path:
     if binary.exists():
         return binary.resolve()
     if no_build:
         raise FileNotFoundError(
             f"Graphite binary not found: {binary}; build it or omit --no-build"
         )
-    print("build     cargo build --release")
-    subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT, check=True)
+    command = ["cargo", "build", "--release"]
+    if backend == "bandage":
+        command.extend(["--features", "ogdf"])
+    print("build     " + " ".join(command))
+    subprocess.run(command, cwd=REPO_ROOT, check=True)
     if not binary.exists():
         raise FileNotFoundError(f"Graphite binary still not found after build: {binary}")
     return binary.resolve()
@@ -380,7 +383,7 @@ def check_expectations(
 
 
 def run_selected(args: argparse.Namespace, manifest: dict[str, Any]) -> int:
-    graphite = ensure_graphite(args.graphite, args.no_build)
+    graphite = ensure_graphite(args.graphite, args.no_build, args.backend)
     args.results_dir.mkdir(parents=True, exist_ok=True)
     selected = selected_datasets(manifest, args.tier, args.include_generated)
     results: list[dict[str, Any]] = []
