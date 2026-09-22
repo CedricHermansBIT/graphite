@@ -7,6 +7,12 @@ edition = "2024"
 name = "graphite"
 path = "src/main.rs"
 
+[features]
+default = []
+# Optional Bandage/OGDF reference backend. Enabling this feature requires the
+# Bandage submodule and a C++14 compiler; the default Rust-only build does not.
+ogdf = []
+
 [dependencies]
 eframe = { version = "0.36.2", features = ["default"] }
 egui = "0.36.2"
