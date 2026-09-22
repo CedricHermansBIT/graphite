@@ -55,6 +55,11 @@ const DRAG_REPULSION_SCALE: f32 = 0.55;
 /// feel stuck.
 const DRAG_DAMPING_SCALE: f32 = 0.75;
 
+/// If a node's drag force reverses direction between consecutive iterations,
+/// damp that corrective step heavily. This suppresses branch-point chatter
+/// without slowing followers that are still moving consistently toward the drag.
+const DRAG_REVERSAL_DAMPING_SCALE: f32 = 0.22;
+
 /// Unlike the normal relaxation pass, an active drag must not cool down over
 /// time. Otherwise a long drag eventually leaves linked segments almost fixed
 /// in place while the grabbed contig keeps moving away.
@@ -125,6 +130,10 @@ pub struct Layout {
 
     /// Reusable displacement buffer — zeroed at the start of each step.
     disp: Vec<Pos2>,
+
+    /// Previous raw force while dragging. Used only to detect direction
+    /// reversals and suppress oscillation at highly connected branch points.
+    prev_drag_force: Vec<Pos2>,
 
     revision: usize,
     pub iteration: usize,
@@ -250,6 +259,7 @@ impl Layout {
                 user_positioned: false,
                 drag_component: None,
                 disp: Vec::new(),
+                prev_drag_force: Vec::new(),
                 revision: 0,
                 iteration: 0,
                 converged: false,
@@ -507,6 +517,7 @@ impl Layout {
         }
 
         let disp = vec![[0.0_f32; 2]; total_pts];
+        let prev_drag_force = vec![[0.0_f32; 2]; total_pts];
 
         let mut layout = Self {
             positions,
@@ -527,6 +538,7 @@ impl Layout {
             user_positioned: false,
             drag_component: None,
             disp,
+            prev_drag_force,
             revision: 0,
             iteration: 0,
             converged: false,
@@ -974,13 +986,23 @@ impl Layout {
             if attractor.is_some_and(|(_, grabbed)| pi == grabbed) {
                 continue;
             }
+            let raw_dx = self.disp[pi][0];
+            let raw_dy = self.disp[pi][1];
             let damping = if attractor.is_some() {
-                DRAG_DAMPING_SCALE
+                let previous = self.prev_drag_force[pi];
+                let reversing = raw_dx * previous[0] + raw_dy * previous[1] < 0.0;
+                self.prev_drag_force[pi] = [raw_dx, raw_dy];
+                if reversing {
+                    DRAG_DAMPING_SCALE * DRAG_REVERSAL_DAMPING_SCALE
+                } else {
+                    DRAG_DAMPING_SCALE
+                }
             } else {
+                self.prev_drag_force[pi] = [0.0, 0.0];
                 1.0
             };
-            let dx = self.disp[pi][0] * damping;
-            let dy = self.disp[pi][1] * damping;
+            let dx = raw_dx * damping;
+            let dy = raw_dy * damping;
             let d = (dx * dx + dy * dy).sqrt().max(0.001);
             let clamped = d.min(temp);
             self.positions[pi][0] += dx / d * clamped;
@@ -990,6 +1012,7 @@ impl Layout {
             }
         }
         if let Some((pos, pi)) = grabbed_pi {
+            self.prev_drag_force[pi] = [0.0, 0.0];
             self.positions[pi] = pos;
         }
 
@@ -1354,6 +1377,23 @@ mod tests {
             end_move < grabbed_move,
             "drag falloff should let the grabbed contig bend instead of translating rigidly"
         );
+    }
+
+    #[test]
+    fn drag_force_reversal_is_damped() {
+        let graph = graph(&[1200.0, 1200.0], &[]);
+        let mut layout = Layout::new_with_graph(&graph);
+        let pi = layout.node_pts_start[0];
+        layout.prev_drag_force[pi] = [100.0, 0.0];
+        layout.disp[pi] = [-100.0, 0.0];
+
+        let raw_dx = layout.disp[pi][0];
+        let raw_dy = layout.disp[pi][1];
+        let previous = layout.prev_drag_force[pi];
+        let reversing = raw_dx * previous[0] + raw_dy * previous[1] < 0.0;
+        assert!(reversing);
+        let damped = raw_dx * DRAG_DAMPING_SCALE * DRAG_REVERSAL_DAMPING_SCALE;
+        assert!(damped.abs() < raw_dx.abs() * 0.2);
     }
 
     #[test]
