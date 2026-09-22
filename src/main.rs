@@ -30,7 +30,7 @@ struct Args {
     #[argh(option)]
     benchmark_output: Option<String>,
 
-    /// initial layout backend: rust or bandage
+    /// initial layout backend: rust, or bandage when built with --features ogdf
     #[argh(option, default = "String::from(\"rust\")")]
     layout_backend: String,
 
@@ -45,6 +45,26 @@ struct Args {
 
 fn milliseconds(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn parse_layout_backend(value: &str) -> Result<layout::LayoutBackend> {
+    if let Some(backend) = layout::LayoutBackend::parse(value) {
+        return Ok(backend);
+    }
+
+    #[cfg(not(feature = "ogdf"))]
+    if matches!(value.to_ascii_lowercase().as_str(), "bandage" | "ogdf") {
+        anyhow::bail!(
+            "layout backend '{value}' is not included in this build; rebuild with \
+             `cargo build --release --features ogdf` to enable the Bandage/OGDF reference backend"
+        );
+    }
+
+    #[cfg(feature = "ogdf")]
+    anyhow::bail!("unknown layout backend '{value}'; expected 'rust' or 'bandage'");
+
+    #[cfg(not(feature = "ogdf"))]
+    anyhow::bail!("unknown layout backend '{value}'; expected 'rust'");
 }
 
 fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout::LayoutBackend) -> Result<()> {
@@ -171,11 +191,7 @@ fn main() -> Result<()> {
             .file
             .as_deref()
             .context("benchmark mode requires a GFA file")?;
-        let backend = layout::LayoutBackend::parse(&args.layout_backend)
-            .with_context(|| format!(
-                "unknown layout backend '{}'; expected 'bandage' or 'rust'",
-                args.layout_backend
-            ))?;
+        let backend = parse_layout_backend(&args.layout_backend)?;
         return run_benchmark(
             file,
             args.benchmark_steps,
@@ -184,11 +200,7 @@ fn main() -> Result<()> {
         );
     }
 
-    let backend = layout::LayoutBackend::parse(&args.layout_backend)
-        .with_context(|| format!(
-            "unknown layout backend '{}'; expected 'bandage' or 'rust'",
-            args.layout_backend
-        ))?;
+    let backend = parse_layout_backend(&args.layout_backend)?;
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
