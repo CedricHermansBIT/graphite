@@ -959,14 +959,14 @@ impl GfaApp {
                         },
                     ) = (ctx.input(|i| i.pointer.press_origin()), &self.load_state)
                     {
+                        let w = [
+                            (screen.x - vp_center.x - self.pan.x) / self.zoom,
+                            (screen.y - vp_center.y - self.pan.y) / self.zoom,
+                        ];
                         self.grabbed_phys =
                             hit_test_node(screen, viewport, view, layout_snapshot, &render_p)
-                                .map(|ni| layout_snapshot.node_pts_start[ni]);
+                                .and_then(|ni| layout_snapshot.nearest_physics_point(ni, w));
                         if let Some(pi) = self.grabbed_phys {
-                            let w = [
-                                (screen.x - vp_center.x - self.pan.x) / self.zoom,
-                                (screen.y - vp_center.y - self.pan.y) / self.zoom,
-                            ];
                             let p = layout_snapshot.positions[pi];
                             self.grab_offset = [p[0] - w[0], p[1] - w[1]];
                         }
@@ -996,7 +996,7 @@ impl GfaApp {
                         .map(|(pos, pi)| (pos, pi));
                     layout_runner.set_attractor(att);
                     if let Some((pos, pi)) = att {
-                        layout_snapshot.drag_to(pos, pi);
+                        layout_snapshot.drag_preview_to(pos, pi);
                     }
                     if dragging {
                         ctx.request_repaint();
