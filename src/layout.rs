@@ -229,6 +229,13 @@ pub struct Layout {
     circular: Vec<bool>,
     linear: Vec<bool>,
     fixed: Vec<bool>,
+    /// Ordered physics-node chain for topology-proven linear components.
+    /// Consecutive entries span both within-contig pieces and GFA links.
+    linear_paths: Vec<Vec<usize>>,
+    /// Reverse lookup: physics node -> index in its linear component path.
+    linear_path_pos: Vec<usize>,
+    /// Rest length between linear_paths[ci][i] and [i + 1].
+    linear_rest_lengths: Vec<Vec<f32>>,
     physics_spacing: f32,
     active_points: Vec<usize>,
     grid: GridIndex,
@@ -363,6 +370,9 @@ impl Layout {
                 circular: Vec::new(),
                 linear: Vec::new(),
                 fixed: Vec::new(),
+                linear_paths: Vec::new(),
+                linear_path_pos: Vec::new(),
+                linear_rest_lengths: Vec::new(),
                 physics_spacing: BANDAGE_NODE_SEGMENT_LENGTH,
                 active_points: Vec::new(),
                 grid: GridIndex::default(),
@@ -606,6 +616,55 @@ impl Layout {
             }
         }
 
+        let mut linear_paths = vec![Vec::new(); components.len()];
+        let mut linear_path_pos = vec![usize::MAX; total_pts];
+        for (ci, comp) in components.iter().enumerate() {
+            if !linear[ci] {
+                continue;
+            }
+            let Some(mut entry) = comp
+                .iter()
+                .flat_map(|&node| [2 * node, 2 * node + 1])
+                .filter(|&endpoint| ends[endpoint].is_empty())
+                .min()
+            else {
+                continue;
+            };
+            let path = &mut linear_paths[ci];
+            let mut visited = 0usize;
+            while visited < comp.len() {
+                let node = entry / 2;
+                let start = node_pts_start[node];
+                let count = node_pts_count[node];
+                if entry % 2 == 0 {
+                    path.extend(start..start + count);
+                } else {
+                    path.extend((start..start + count).rev());
+                }
+                visited += 1;
+                let exit = entry ^ 1;
+                if ends[exit].is_empty() {
+                    break;
+                }
+                entry = ends[exit][0];
+            }
+            for (index, &pi) in path.iter().enumerate() {
+                linear_path_pos[pi] = index;
+            }
+        }
+        let linear_rest_lengths: Vec<Vec<f32>> = linear_paths
+            .iter()
+            .map(|path| {
+                path.windows(2)
+                    .map(|pair| {
+                        let a = positions[pair[0]];
+                        let b = positions[pair[1]];
+                        (b[0] - a[0]).hypot(b[1] - a[1]).max(0.001)
+                    })
+                    .collect()
+            })
+            .collect();
+
         let active_points: Vec<_> = (0..total_pts)
             .filter(|&pi| !fixed[comp_ids[phys_to_node[pi] as usize]])
             .collect();
@@ -696,6 +755,9 @@ impl Layout {
             circular,
             linear,
             fixed,
+            linear_paths,
+            linear_path_pos,
+            linear_rest_lengths,
             physics_spacing,
             active_points,
             grid: GridIndex::default(),
@@ -1021,17 +1083,6 @@ impl Layout {
                     p[1] += delta[1];
                 }
             }
-        } else if self.linear[ci] {
-            // A topology-proven linear component is already laid out as a
-            // sequence of intact contigs. Moving only the nearest physics point
-            // makes a grabbed segment appear to stretch from one end, so move
-            // the selected contig rigidly and let its graph links flex instead.
-            let start = self.node_pts_start[v];
-            let count = self.node_pts_count[v];
-            for p in &mut self.positions[start..start + count] {
-                p[0] += delta[0];
-                p[1] += delta[1];
-            }
         } else {
             // Match Bandage's "nearby pieces" feel for non-linear components:
             // the grabbed physics point follows the cursor exactly, while
@@ -1048,6 +1099,72 @@ impl Layout {
                 p[1] += delta[1] * drag_strength;
             }
         }
+    }
+
+    /// Drag a topology-proven linear component as an inextensible rope.
+    /// The grabbed physics point follows the cursor exactly. Distance
+    /// constraints are then propagated independently towards both tips, so the
+    /// path can bend freely without stretching its segments or GFA links.
+    fn drag_linear_rope_to(&mut self, pos: Pos2, pi: usize) -> bool {
+        if pi >= self.positions.len() {
+            return false;
+        }
+        let node = self.phys_to_node[pi] as usize;
+        let ci = self.comp_ids[node];
+        if !self.linear[ci] {
+            return false;
+        }
+        let path_index = self.linear_path_pos[pi];
+        if path_index == usize::MAX || self.linear_paths[ci].is_empty() {
+            return false;
+        }
+
+        self.user_positioned = true;
+        self.drag_component = Some(ci);
+        self.positions[pi] = pos;
+
+        let path = &self.linear_paths[ci];
+        let rest = &self.linear_rest_lengths[ci];
+
+        // Pull from the grabbed point towards the right tip.
+        for index in path_index + 1..path.len() {
+            let anchor = self.positions[path[index - 1]];
+            let current = self.positions[path[index]];
+            let wanted = rest[index - 1];
+            let dx = current[0] - anchor[0];
+            let dy = current[1] - anchor[1];
+            let distance = dx.hypot(dy);
+            let direction = if distance > 0.001 {
+                [dx / distance, dy / distance]
+            } else {
+                [1.0, 0.0]
+            };
+            self.positions[path[index]] = [
+                anchor[0] + direction[0] * wanted,
+                anchor[1] + direction[1] * wanted,
+            ];
+        }
+
+        // Pull from the grabbed point towards the left tip.
+        for index in (0..path_index).rev() {
+            let anchor = self.positions[path[index + 1]];
+            let current = self.positions[path[index]];
+            let wanted = rest[index];
+            let dx = current[0] - anchor[0];
+            let dy = current[1] - anchor[1];
+            let distance = dx.hypot(dy);
+            let direction = if distance > 0.001 {
+                [dx / distance, dy / distance]
+            } else {
+                [-1.0, 0.0]
+            };
+            self.positions[path[index]] = [
+                anchor[0] + direction[0] * wanted,
+                anchor[1] + direction[1] * wanted,
+            ];
+        }
+
+        true
     }
 
     // ── Force-directed step ───────────────────────────────────────────────────
@@ -1068,7 +1185,32 @@ impl Layout {
         let _ = graph;
         let attractor = attractor.filter(|(_, pi)| *pi < total_pts);
         if let Some((pos, pi)) = attractor {
+            let node = self.phys_to_node[pi] as usize;
+            let ci = self.comp_ids[node];
+            if self.linear[ci] && !self.fixed[ci] && self.drag_linear_rope_to(pos, pi) {
+                for force in &mut self.prev_drag_force {
+                    *force = [0.0, 0.0];
+                }
+                self.iteration += 1;
+                self.converged = false;
+                return;
+            }
             self.drag_to(pos, pi);
+        } else if let Some(ci) = self.drag_component {
+            if self.linear[ci] {
+                // The rope constraint already leaves a valid, non-stretched
+                // linear geometry. Do not wake the generic FR relaxation on
+                // release: its near-field repulsion uses a different force
+                // model from the initial FMMM layout and can blow short graph
+                // links apart.
+                self.drag_component = None;
+                for force in &mut self.prev_drag_force {
+                    *force = [0.0, 0.0];
+                }
+                self.iteration += 1;
+                self.converged = true;
+                return;
+            }
         }
 
         if self.active_points.is_empty() || self.drag_component.is_some_and(|ci| self.fixed[ci]) {
@@ -1611,25 +1753,34 @@ mod tests {
     }
 
     #[test]
-    fn dragging_linear_component_moves_selected_contig_rigidly() {
+    fn dragging_linear_component_behaves_like_nonstretching_rope() {
         use Strand::Forward as F;
         let graph = graph(&[1200.0, 1200.0, 1200.0], &[(0, F, 1, F), (1, F, 2, F)]);
         let mut layout = Layout::new_with_graph(&graph);
-        assert!(layout.linear[layout.comp_ids[1]]);
+        let ci = layout.comp_ids[1];
+        assert!(layout.linear[ci]);
 
-        let start = layout.node_pts_start[1];
-        let count = layout.node_pts_count[1];
-        let before = layout.positions[start..start + count].to_vec();
-        let grabbed = start;
+        let path = layout.linear_paths[ci].clone();
+        let rest = layout.linear_rest_lengths[ci].clone();
+        let grabbed_index = path.len() / 2;
+        let grabbed = path[grabbed_index];
         let target = [
             layout.positions[grabbed][0] + 400.0,
             layout.positions[grabbed][1] + 150.0,
         ];
-        layout.drag_to(target, grabbed);
 
-        for (old, new) in before.iter().zip(&layout.positions[start..start + count]) {
-            assert!((new[0] - old[0] - 400.0).abs() < 0.001);
-            assert!((new[1] - old[1] - 150.0).abs() < 0.001);
+        assert!(layout.drag_linear_rope_to(target, grabbed));
+        assert_eq!(layout.positions[grabbed], target);
+
+        for (index, pair) in path.windows(2).enumerate() {
+            let a = layout.positions[pair[0]];
+            let b = layout.positions[pair[1]];
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            assert!(
+                (length - rest[index]).abs() < 0.01,
+                "rope link {index} stretched from {} to {length}",
+                rest[index]
+            );
         }
     }
 
