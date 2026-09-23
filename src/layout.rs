@@ -85,8 +85,6 @@ const PBD_RING_AREA_STIFFNESS: f32 = 0.08;
 const PACK_TARGET_ASPECT: f32 = 1.35;
 const PACK_CELL_SCALE: f32 = 0.75;
 const PACK_PADDING_CELLS: i32 = 1;
-const PACK_COMPACTION_PASSES: usize = 2;
-const PACK_SIDE_SEARCH_CELLS: i32 = 12;
 
 #[derive(Clone, Copy, Debug)]
 struct PbdDistanceConstraint {
@@ -181,6 +179,11 @@ struct PackFootprint {
     cells: Vec<(i32, i32)>,
     width: i32,
     height: i32,
+    /// Lowest and highest occupied cell in each footprint column. These let
+    /// the packer test an entire vertical placement in O(width) instead of
+    /// repeatedly collision-testing every raster cell while walking upward.
+    bottom: Vec<i32>,
+    top: Vec<i32>,
     /// Normalized-cell location corresponding to the component's bounding-box
     /// minimum. Dilation can make this non-zero.
     anchor_x: i32,
@@ -234,49 +237,32 @@ fn normalize_pack_cells(mut raw: HashSet<(i32, i32)>) -> PackFootprint {
         .collect();
     cells.sort_unstable();
 
+    let width = max_x - min_x + 1;
+    let height = max_y - min_y + 1;
+    let mut bottom = vec![i32::MAX; width as usize];
+    let mut top = vec![i32::MIN; width as usize];
+    for &(x, y) in &cells {
+        let column = x as usize;
+        bottom[column] = bottom[column].min(y);
+        top[column] = top[column].max(y);
+    }
+    // Dilation normally makes every column non-empty, but keep the profile
+    // total so degenerate rasterizations cannot poison skyline arithmetic.
+    for x in 0..width as usize {
+        if bottom[x] == i32::MAX {
+            bottom[x] = 0;
+            top[x] = -1;
+        }
+    }
+
     PackFootprint {
         cells,
-        width: max_x - min_x + 1,
-        height: max_y - min_y + 1,
+        width,
+        height,
+        bottom,
+        top,
         anchor_x: -min_x,
         anchor_y: -min_y,
-    }
-}
-
-fn pack_collides(
-    occupancy: &HashSet<(i32, i32)>,
-    footprint: &PackFootprint,
-    x: i32,
-    y: i32,
-) -> bool {
-    footprint
-        .cells
-        .iter()
-        .any(|&(dx, dy)| occupancy.contains(&(x + dx, y + dy)))
-}
-
-fn add_pack_footprint(
-    occupancy: &mut HashSet<(i32, i32)>,
-    footprint: &PackFootprint,
-    x: i32,
-    y: i32,
-) {
-    occupancy.extend(
-        footprint
-            .cells
-            .iter()
-            .map(|&(dx, dy)| (x + dx, y + dy)),
-    );
-}
-
-fn remove_pack_footprint(
-    occupancy: &mut HashSet<(i32, i32)>,
-    footprint: &PackFootprint,
-    x: i32,
-    y: i32,
-) {
-    for &(dx, dy) in &footprint.cells {
-        occupancy.remove(&(x + dx, y + dy));
     }
 }
 
@@ -1357,10 +1343,10 @@ impl Layout {
 
     /// Hybrid component packing:
     ///
-    /// 1. Make a fast coarse shelf arrangement from component envelopes.
-    /// 2. Rasterize the actual component silhouette.
-    /// 3. Compact those silhouettes upward and sideways on a coarse occupancy
-    ///    grid. Circular assemblies use a filled ellipse footprint, protecting
+    /// 1. Rasterize the actual component silhouette.
+    /// 2. Reduce each silhouette to per-column bottom/top profiles.
+    /// 3. Place profiles with a shape-aware skyline in near-linear time.
+    ///    Circular assemblies use a filled ellipse footprint, protecting
     ///    their interior while allowing unrelated components to occupy the
     ///    otherwise wasted corners of their bounding square.
     ///
@@ -1444,9 +1430,17 @@ impl Layout {
             footprints.push(normalize_pack_cells(raw));
         }
 
-        // Coarse rectangle arrangement. We use the raster-envelope area rather
-        // than raw world bounds and bias the target toward a modest landscape
-        // aspect ratio.
+        // Fast shape-aware skyline packing. The previous implementation first
+        // shelf-packed all components and then repeatedly walked each footprint
+        // upward one grid row at a time while doing HashSet collision checks.
+        // On assemblies with thousands of components that made initialization
+        // effectively O(component_count * drawing_height * footprint_size).
+        //
+        // A skyline stores only the highest occupied cell in each output
+        // column. Together with each shape's bottom/top profiles, the lowest
+        // non-overlapping y for a candidate x is computed directly in O(width).
+        // This keeps the useful circle-corner compaction without a height-sized
+        // inner loop.
         let envelope_area: f32 = footprints
             .iter()
             .map(|shape| (shape.width * shape.height).max(1) as f32)
@@ -1457,69 +1451,65 @@ impl Layout {
             .ceil()
             .max(max_width as f32) as i32;
 
+        let mut skyline = vec![0_i32; target_width.max(1) as usize];
         let mut placements = vec![(0_i32, 0_i32); footprints.len()];
-        let (mut x, mut y, mut row_h) = (0_i32, 0_i32, 0_i32);
+        let mut packed_height = 0_i32;
+
         for (ci, shape) in footprints.iter().enumerate() {
-            if x > 0 && x + shape.width > target_width {
-                x = 0;
-                y += row_h;
-                row_h = 0;
-            }
-            placements[ci] = (x, y);
-            x += shape.width;
-            row_h = row_h.max(shape.height);
-        }
+            let max_x = (target_width - shape.width).max(0);
+            let mut best_x = 0_i32;
+            let mut best_y = i32::MAX;
+            let mut best_height = i32::MAX;
 
-        // Populate occupancy with the coarse arrangement, then repeatedly
-        // compact each silhouette. Side-search lets an item slide around a
-        // circular/irregular blocker and then continue upward into its unused
-        // bounding-box corner.
-        let mut occupancy = HashSet::new();
-        for (ci, shape) in footprints.iter().enumerate() {
-            let (px, py) = placements[ci];
-            add_pack_footprint(&mut occupancy, shape, px, py);
-        }
-
-        for _ in 0..PACK_COMPACTION_PASSES {
-            for ci in 0..footprints.len() {
-                let shape = &footprints[ci];
-                let (old_x, old_y) = placements[ci];
-                remove_pack_footprint(&mut occupancy, shape, old_x, old_y);
-
-                let min_x = (old_x - PACK_SIDE_SEARCH_CELLS).max(0);
-                let max_x = (old_x + PACK_SIDE_SEARCH_CELLS)
-                    .min((target_width - shape.width).max(0));
-                let mut best = (old_x, old_y);
-
-                for candidate_x in min_x..=max_x {
-                    // Only consider lateral positions that are valid at the
-                    // current height; this keeps compaction cheap even for
-                    // tens of thousands of tiny components.
-                    if pack_collides(&occupancy, shape, candidate_x, old_y) {
+            for candidate_x in 0..=max_x {
+                let mut candidate_y = 0_i32;
+                for local_x in 0..shape.width {
+                    let column = local_x as usize;
+                    if shape.top[column] < shape.bottom[column] {
                         continue;
                     }
-                    let mut candidate_y = old_y;
-                    while candidate_y > 0
-                        && !pack_collides(
-                            &occupancy,
-                            shape,
-                            candidate_x,
-                            candidate_y - 1,
-                        )
-                    {
-                        candidate_y -= 1;
-                    }
+                    candidate_y = candidate_y.max(
+                        skyline[(candidate_x + local_x) as usize] - shape.bottom[column],
+                    );
+                }
+                candidate_y = candidate_y.max(0);
 
-                    if candidate_y < best.1
-                        || (candidate_y == best.1 && candidate_x < best.0)
-                    {
-                        best = (candidate_x, candidate_y);
+                let mut resulting_height = packed_height;
+                for local_x in 0..shape.width {
+                    let column = local_x as usize;
+                    if shape.top[column] < shape.bottom[column] {
+                        continue;
                     }
+                    resulting_height =
+                        resulting_height.max(candidate_y + shape.top[column] + 1);
                 }
 
-                placements[ci] = best;
-                add_pack_footprint(&mut occupancy, shape, best.0, best.1);
+                // Prefer the placement that keeps the total drawing shortest;
+                // then the lowest y, then the left-most x. This is a skyline
+                // analogue of best-height/best-fit rectangle heuristics.
+                if resulting_height < best_height
+                    || (resulting_height == best_height && candidate_y < best_y)
+                    || (resulting_height == best_height
+                        && candidate_y == best_y
+                        && candidate_x < best_x)
+                {
+                    best_x = candidate_x;
+                    best_y = candidate_y;
+                    best_height = resulting_height;
+                }
             }
+
+            placements[ci] = (best_x, best_y);
+            for local_x in 0..shape.width {
+                let column = local_x as usize;
+                if shape.top[column] < shape.bottom[column] {
+                    continue;
+                }
+                let global_x = (best_x + local_x) as usize;
+                skyline[global_x] =
+                    skyline[global_x].max(best_y + shape.top[column] + 1);
+            }
+            packed_height = packed_height.max(best_height);
         }
 
         // Convert cell placements back to world-space translations.
