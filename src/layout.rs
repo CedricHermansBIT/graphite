@@ -263,6 +263,31 @@ impl Layout {
         self.node_pts_start.len()
     }
 
+    /// Return the physics point on a visible contig that is closest to the
+    /// world-space cursor. Grab mode must use this rather than always taking
+    /// the first point of the contig, otherwise every drag is effectively an
+    /// endpoint drag even when the user clicks the middle of a segment.
+    pub fn nearest_physics_point(&self, node: usize, pos: Pos2) -> Option<usize> {
+        if node >= self.num_nodes() {
+            return None;
+        }
+        let start = self.node_pts_start[node];
+        let count = self.node_pts_count[node];
+        (start..start + count).min_by(|&a, &b| {
+            let da = {
+                let dx = self.positions[a][0] - pos[0];
+                let dy = self.positions[a][1] - pos[1];
+                dx * dx + dy * dy
+            };
+            let db = {
+                let dx = self.positions[b][0] - pos[0];
+                let dy = self.positions[b][1] - pos[1];
+                dx * dx + dy * dy
+            };
+            da.total_cmp(&db)
+        })
+    }
+
     /// First physics-node position of segment `ni`.
     #[inline]
     pub fn start(&self, ni: usize) -> Pos2 {
@@ -1060,6 +1085,23 @@ impl Layout {
         }
     }
 
+    /// Apply the same drag behavior used by the background layout worker to
+    /// the UI snapshot for immediate feedback. Keeping both paths identical is
+    /// important: using generic drag_to() in the UI while the worker applies
+    /// rope constraints makes the two layouts fight and causes visible jumps.
+    pub fn drag_preview_to(&mut self, pos: Pos2, pi: usize) {
+        if pi >= self.positions.len() {
+            return;
+        }
+        let node = self.phys_to_node[pi] as usize;
+        let ci = self.comp_ids[node];
+        if self.linear[ci] && !self.fixed[ci] {
+            let _ = self.drag_linear_rope_to(pos, pi);
+        } else {
+            self.drag_to(pos, pi);
+        }
+    }
+
     /// Move a whole contig (or a circular assembly) without stretching it.
     pub fn drag_to(&mut self, pos: Pos2, pi: usize) {
         if pi >= self.positions.len() {
@@ -1750,6 +1792,19 @@ mod tests {
             end_move < grabbed_move,
             "drag falloff should let the grabbed contig bend instead of translating rigidly"
         );
+    }
+
+    #[test]
+    fn grab_uses_nearest_physics_point_not_contig_start() {
+        let graph = graph(&[4000.0], &[]);
+        let layout = Layout::new_with_graph(&graph);
+        let start = layout.node_pts_start[0];
+        let count = layout.node_pts_count[0];
+        assert!(count >= 3);
+
+        let middle = start + count / 2;
+        let target = layout.positions[middle];
+        assert_eq!(layout.nearest_physics_point(0, target), Some(middle));
     }
 
     #[test]
