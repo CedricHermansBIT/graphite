@@ -78,6 +78,16 @@ const PBD_ITERATIONS: usize = 12;
 const PBD_BEND_STIFFNESS: f32 = 0.18;
 const PBD_RING_AREA_STIFFNESS: f32 = 0.08;
 
+/// Component packing first builds a coarse rectangular arrangement, then
+/// compacts it using rasterized component silhouettes. A landscape-ish target
+/// avoids excessively tall overview layouts while still fitting portrait
+/// windows well after "Fit".
+const PACK_TARGET_ASPECT: f32 = 1.35;
+const PACK_CELL_SCALE: f32 = 0.75;
+const PACK_PADDING_CELLS: i32 = 1;
+const PACK_COMPACTION_PASSES: usize = 2;
+const PACK_SIDE_SEARCH_CELLS: i32 = 12;
+
 #[derive(Clone, Copy, Debug)]
 struct PbdDistanceConstraint {
     a: usize,
@@ -162,6 +172,111 @@ fn preserve_ring_area(
         }
         positions[pi][0] = center[0] + (positions[pi][0] - center[0]) * scale;
         positions[pi][1] = center[1] + (positions[pi][1] - center[1]) * scale;
+    }
+}
+
+
+#[derive(Clone, Debug)]
+struct PackFootprint {
+    cells: Vec<(i32, i32)>,
+    width: i32,
+    height: i32,
+    /// Normalized-cell location corresponding to the component's bounding-box
+    /// minimum. Dilation can make this non-zero.
+    anchor_x: i32,
+    anchor_y: i32,
+}
+
+fn rasterize_pack_segment(
+    cells: &mut HashSet<(i32, i32)>,
+    a: Pos2,
+    b: Pos2,
+    lo: Pos2,
+    cell_size: f32,
+) {
+    let ax = (a[0] - lo[0]) / cell_size;
+    let ay = (a[1] - lo[1]) / cell_size;
+    let bx = (b[0] - lo[0]) / cell_size;
+    let by = (b[1] - lo[1]) / cell_size;
+    let steps = ((bx - ax).abs().max((by - ay).abs()) * 2.0)
+        .ceil()
+        .max(1.0) as usize;
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let x = (ax + (bx - ax) * t).floor() as i32;
+        let y = (ay + (by - ay) * t).floor() as i32;
+        cells.insert((x, y));
+    }
+}
+
+fn normalize_pack_cells(mut raw: HashSet<(i32, i32)>) -> PackFootprint {
+    if raw.is_empty() {
+        raw.insert((0, 0));
+    }
+
+    let source: Vec<_> = raw.iter().copied().collect();
+    for (x, y) in source {
+        for dx in -PACK_PADDING_CELLS..=PACK_PADDING_CELLS {
+            for dy in -PACK_PADDING_CELLS..=PACK_PADDING_CELLS {
+                raw.insert((x + dx, y + dy));
+            }
+        }
+    }
+
+    let min_x = raw.iter().map(|&(x, _)| x).min().unwrap_or(0);
+    let min_y = raw.iter().map(|&(_, y)| y).min().unwrap_or(0);
+    let max_x = raw.iter().map(|&(x, _)| x).max().unwrap_or(0);
+    let max_y = raw.iter().map(|&(_, y)| y).max().unwrap_or(0);
+
+    let mut cells: Vec<_> = raw
+        .into_iter()
+        .map(|(x, y)| (x - min_x, y - min_y))
+        .collect();
+    cells.sort_unstable();
+
+    PackFootprint {
+        cells,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+        anchor_x: -min_x,
+        anchor_y: -min_y,
+    }
+}
+
+fn pack_collides(
+    occupancy: &HashSet<(i32, i32)>,
+    footprint: &PackFootprint,
+    x: i32,
+    y: i32,
+) -> bool {
+    footprint
+        .cells
+        .iter()
+        .any(|&(dx, dy)| occupancy.contains(&(x + dx, y + dy)))
+}
+
+fn add_pack_footprint(
+    occupancy: &mut HashSet<(i32, i32)>,
+    footprint: &PackFootprint,
+    x: i32,
+    y: i32,
+) {
+    occupancy.extend(
+        footprint
+            .cells
+            .iter()
+            .map(|&(dx, dy)| (x + dx, y + dy)),
+    );
+}
+
+fn remove_pack_footprint(
+    occupancy: &mut HashSet<(i32, i32)>,
+    footprint: &PackFootprint,
+    x: i32,
+    y: i32,
+) {
+    for &(dx, dy) in &footprint.cells {
+        occupancy.remove(&(x + dx, y + dy));
     }
 }
 
@@ -1240,10 +1355,25 @@ impl Layout {
         }
     }
 
-    /// Pack actual polyline bounds, including long singletons and circles.
+    /// Hybrid component packing:
+    ///
+    /// 1. Make a fast coarse shelf arrangement from component envelopes.
+    /// 2. Rasterize the actual component silhouette.
+    /// 3. Compact those silhouettes upward and sideways on a coarse occupancy
+    ///    grid. Circular assemblies use a filled ellipse footprint, protecting
+    ///    their interior while allowing unrelated components to occupy the
+    ///    otherwise wasted corners of their bounding square.
+    ///
+    /// This keeps the predictable speed of rectangular packing while avoiding
+    /// the large empty rows caused by circles and irregular branched graphs.
     fn pack_components(&mut self) {
-        let gap = self.physics_spacing * 3.0;
-        let bounds: Vec<_> = self
+        if self.components.is_empty() {
+            return;
+        }
+
+        let cell_size = (self.physics_spacing * PACK_CELL_SCALE).max(1.0);
+
+        let bounds: Vec<(Pos2, Pos2)> = self
             .components
             .iter()
             .map(|comp| {
@@ -1251,40 +1381,165 @@ impl Layout {
                 let mut hi = [f32::NEG_INFINITY; 2];
                 for &v in comp {
                     for p in self.pts(v) {
-                        for d in 0..2 {
-                            lo[d] = lo[d].min(p[d]);
-                            hi[d] = hi[d].max(p[d]);
-                        }
+                        lo[0] = lo[0].min(p[0]);
+                        lo[1] = lo[1].min(p[1]);
+                        hi[0] = hi[0].max(p[0]);
+                        hi[1] = hi[1].max(p[1]);
                     }
                 }
                 (lo, hi)
             })
             .collect();
-        let target = bounds
-            .iter()
-            .map(|(lo, hi)| (hi[0] - lo[0] + gap) * (hi[1] - lo[1] + gap))
-            .sum::<f32>()
-            .sqrt()
-            .max(gap);
-        let (mut x, mut y, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
-        for (ci, (lo, hi)) in bounds.into_iter().enumerate() {
-            let w = hi[0] - lo[0];
-            let h = hi[1] - lo[1];
-            if x > 0.0 && x + w > target {
-                x = 0.0;
-                y += row_h + gap;
-                row_h = 0.0;
-            }
-            for &v in &self.components[ci] {
-                for p in &mut self.positions
-                    [self.node_pts_start[v]..self.node_pts_start[v] + self.node_pts_count[v]]
-                {
-                    p[0] += x - lo[0];
-                    p[1] += y - lo[1];
+
+        let mut footprints = Vec::with_capacity(self.components.len());
+        for ci in 0..self.components.len() {
+            let (lo, hi) = bounds[ci];
+            let mut raw = HashSet::new();
+
+            if self.circular[ci] {
+                // Treat the ring as a filled ellipse for packing. The empty
+                // centre is intentionally protected because putting unrelated
+                // components inside a circular assembly is visually misleading.
+                let width = ((hi[0] - lo[0]) / cell_size).ceil().max(1.0) as i32;
+                let height = ((hi[1] - lo[1]) / cell_size).ceil().max(1.0) as i32;
+                let rx = width.max(1) as f32 * 0.5;
+                let ry = height.max(1) as f32 * 0.5;
+                for x in 0..=width {
+                    for y in 0..=height {
+                        let nx = (x as f32 + 0.5 - rx) / rx.max(0.5);
+                        let ny = (y as f32 + 0.5 - ry) / ry.max(0.5);
+                        if nx * nx + ny * ny <= 1.0 {
+                            raw.insert((x, y));
+                        }
+                    }
+                }
+            } else {
+                // The PBD distance graph already contains all within-contig
+                // pieces and GFA links, so rasterizing it captures the visible
+                // topology more accurately than a component rectangle.
+                for &constraint_index in &self.pbd_component_distances[ci] {
+                    let constraint = self.pbd_distances[constraint_index];
+                    rasterize_pack_segment(
+                        &mut raw,
+                        self.positions[constraint.a],
+                        self.positions[constraint.b],
+                        lo,
+                        cell_size,
+                    );
+                }
+
+                // Defensive fallback for degenerate components.
+                if raw.is_empty() {
+                    for &node in &self.components[ci] {
+                        for &p in self.pts(node) {
+                            raw.insert((
+                                ((p[0] - lo[0]) / cell_size).floor() as i32,
+                                ((p[1] - lo[1]) / cell_size).floor() as i32,
+                            ));
+                        }
+                    }
                 }
             }
-            x += w + gap;
-            row_h = row_h.max(h);
+
+            footprints.push(normalize_pack_cells(raw));
+        }
+
+        // Coarse rectangle arrangement. We use the raster-envelope area rather
+        // than raw world bounds and bias the target toward a modest landscape
+        // aspect ratio.
+        let envelope_area: f32 = footprints
+            .iter()
+            .map(|shape| (shape.width * shape.height).max(1) as f32)
+            .sum();
+        let max_width = footprints.iter().map(|shape| shape.width).max().unwrap_or(1);
+        let target_width = (envelope_area * PACK_TARGET_ASPECT)
+            .sqrt()
+            .ceil()
+            .max(max_width as f32) as i32;
+
+        let mut placements = vec![(0_i32, 0_i32); footprints.len()];
+        let (mut x, mut y, mut row_h) = (0_i32, 0_i32, 0_i32);
+        for (ci, shape) in footprints.iter().enumerate() {
+            if x > 0 && x + shape.width > target_width {
+                x = 0;
+                y += row_h;
+                row_h = 0;
+            }
+            placements[ci] = (x, y);
+            x += shape.width;
+            row_h = row_h.max(shape.height);
+        }
+
+        // Populate occupancy with the coarse arrangement, then repeatedly
+        // compact each silhouette. Side-search lets an item slide around a
+        // circular/irregular blocker and then continue upward into its unused
+        // bounding-box corner.
+        let mut occupancy = HashSet::new();
+        for (ci, shape) in footprints.iter().enumerate() {
+            let (px, py) = placements[ci];
+            add_pack_footprint(&mut occupancy, shape, px, py);
+        }
+
+        for _ in 0..PACK_COMPACTION_PASSES {
+            for ci in 0..footprints.len() {
+                let shape = &footprints[ci];
+                let (old_x, old_y) = placements[ci];
+                remove_pack_footprint(&mut occupancy, shape, old_x, old_y);
+
+                let min_x = (old_x - PACK_SIDE_SEARCH_CELLS).max(0);
+                let max_x = (old_x + PACK_SIDE_SEARCH_CELLS)
+                    .min((target_width - shape.width).max(0));
+                let mut best = (old_x, old_y);
+
+                for candidate_x in min_x..=max_x {
+                    // Only consider lateral positions that are valid at the
+                    // current height; this keeps compaction cheap even for
+                    // tens of thousands of tiny components.
+                    if pack_collides(&occupancy, shape, candidate_x, old_y) {
+                        continue;
+                    }
+                    let mut candidate_y = old_y;
+                    while candidate_y > 0
+                        && !pack_collides(
+                            &occupancy,
+                            shape,
+                            candidate_x,
+                            candidate_y - 1,
+                        )
+                    {
+                        candidate_y -= 1;
+                    }
+
+                    if candidate_y < best.1
+                        || (candidate_y == best.1 && candidate_x < best.0)
+                    {
+                        best = (candidate_x, candidate_y);
+                    }
+                }
+
+                placements[ci] = best;
+                add_pack_footprint(&mut occupancy, shape, best.0, best.1);
+            }
+        }
+
+        // Convert cell placements back to world-space translations.
+        for ci in 0..self.components.len() {
+            let (lo, _) = bounds[ci];
+            let shape = &footprints[ci];
+            let (px, py) = placements[ci];
+            let new_lo = [
+                (px + shape.anchor_x) as f32 * cell_size,
+                (py + shape.anchor_y) as f32 * cell_size,
+            ];
+            let delta = [new_lo[0] - lo[0], new_lo[1] - lo[1]];
+            for &v in &self.components[ci] {
+                let start = self.node_pts_start[v];
+                let count = self.node_pts_count[v];
+                for p in &mut self.positions[start..start + count] {
+                    p[0] += delta[0];
+                    p[1] += delta[1];
+                }
+            }
         }
     }
 
