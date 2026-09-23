@@ -785,6 +785,9 @@ impl GfaApp {
         if let Some(sequence) = sequence {
             ctx.copy_text(sequence);
             self.status_msg = "Selected sequence(s) copied to clipboard.".to_string();
+        } else {
+            self.status_msg =
+                "No selected segment with an embedded sequence to copy.".to_string();
         }
     }
 
@@ -818,6 +821,14 @@ impl GfaApp {
 
             let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
             let viewport = response.rect;
+
+            // Explicitly give the graph canvas keyboard focus after pointer
+            // interaction. egui TextEdits keep focus until another widget asks
+            // for it, so after using a filter/search field Ctrl+C could remain
+            // routed to that stale text focus instead of the graph selection.
+            if response.clicked() || response.drag_started() {
+                response.request_focus();
+            }
             if let Some(nodes) = self.pending_focus_nodes.take() {
                 self.focus_nodes_with_viewport(&nodes, viewport);
             }
@@ -1393,8 +1404,13 @@ impl eframe::App for GfaApp {
         self.right_panel(ui);
         self.canvas(ui);
 
+        // eframe/egui exposes the platform copy gesture as Event::Copy.
+        // Keep the key check as a native fallback, but don't rely on it alone:
+        // some integrations handle Ctrl/Cmd+C semantically and may not leave a
+        // normal Key::C press for application-level shortcut code.
         let copy_shortcut = ctx.input(|input| {
-            input.modifiers.command && input.key_pressed(Key::C)
+            input.events.iter().any(|event| matches!(event, egui::Event::Copy))
+                || (input.modifiers.command && input.key_pressed(Key::C))
         });
         if copy_shortcut && !ctx.text_edit_focused() {
             self.copy_selected_sequences(&ctx);
