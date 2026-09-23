@@ -61,22 +61,24 @@ laid out as circles. This includes single-contig self-loops, two-contig rings,
 reverse-oriented segments, and reciprocal duplicate links. Ambiguous and
 branching cyclic components are handled by FMMM rather than forced into one ring.
 
-In Grab (`G`) mode, Graphite edits the displayed geometry directly instead of
-rerunning the force solver while the pointer is held. This matches Bandage's
-interactive model and avoids large spring/repulsion impulses at branch points.
-Linear components use a length-constrained rope drag; other contigs use the
-Bandage-style nearby-pieces falloff, and circular components move as a unit.
-Connected edges redraw from the edited endpoints. Releasing the pointer preserves
-the manual placement rather than immediately rerunning FMMM/Rust relaxation.
-Automatic packing also stops after manual placement, so manually placed components
-may overlap.
+In Grab (`G`) mode, Graphite uses a separate Position-Based Dynamics
+interaction layer rather than rerunning FMMM/Rust layout forces. The same PBD
+solver handles linear, branched, circular and isolated components. Adjacent
+physics points and GFA links use hard distance constraints, so softness comes
+from bending rather than longitudinal stretch. Each grab also computes Long
+Range Attachment limits from shortest rest-length paths through the component;
+this prevents visible global stretching when local constraint corrections would
+otherwise propagate too slowly. Skip-one constraints provide soft bending only
+inside contigs, leaving GFA junctions as flexible hinges. Unambiguous circular
+components additionally use weak area preservation so a ring can deform without
+immediately collapsing flat. Releasing the pointer preserves the manual PBD
+placement instead of waking the force-directed layout again.
 
-Interactive repulsion uses reusable hashed spatial buckets, an actual distance
-cutoff, and queries confined to the same connected component. Settled contigs
-and rings have no simulation springs. Position updates reuse buffers rather than
-cloning all springs and topology. Dense near-field cells can still incur
-quadratic work. Overview rendering culls offscreen edges, merges indistinguishable
-dots, and draws visible contigs as single polylines.
+Interactive repulsion remains part of ordinary Rust-side layout relaxation, but
+it is not used while a component is being manipulated. Automatic packing stops
+after manual placement, so manually placed components may overlap. Overview
+rendering culls offscreen edges, merges indistinguishable dots, and draws visible
+contigs as single polylines.
 
 ## Remote UI mode
 
