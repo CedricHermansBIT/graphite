@@ -58,10 +58,11 @@ const DRAG_DAMPING_SCALE: f32 = 0.75;
 /// from flipping direction abruptly while keeping sustained motion responsive.
 const DRAG_FORCE_SMOOTHING: f32 = 0.35;
 
-/// Unlike the normal relaxation pass, an active drag must not cool down over
-/// time. Otherwise a long drag eventually leaves linked segments almost fixed
-/// in place while the grabbed contig keeps moving away.
-const DRAG_MOVE_LIMIT_SCALE: f32 = 0.85;
+/// Keep the per-frame force response during a grab at the same movement scale
+/// as the start of ordinary relaxation. The grabbed point itself still follows
+/// the cursor exactly, but connected pieces no longer jump away under a much
+/// larger drag-only temperature.
+const DRAG_MOVE_LIMIT_SCALE: f32 = 0.25;
 
 /// Bandage's "nearby pieces" drag uses an index-distance falloff with a default
 /// strength of 100. Use the same curve for the dragged contig so it bends around
@@ -1020,11 +1021,21 @@ impl Layout {
                     p[1] += delta[1];
                 }
             }
+        } else if self.linear[ci] {
+            // A topology-proven linear component is already laid out as a
+            // sequence of intact contigs. Moving only the nearest physics point
+            // makes a grabbed segment appear to stretch from one end, so move
+            // the selected contig rigidly and let its graph links flex instead.
+            let start = self.node_pts_start[v];
+            let count = self.node_pts_count[v];
+            for p in &mut self.positions[start..start + count] {
+                p[0] += delta[0];
+                p[1] += delta[1];
+            }
         } else {
-            // Match Bandage's "nearby pieces" feel: the grabbed physics point
-            // follows the cursor exactly, while progressively more distant
-            // points on the same contig move by less. The force step below then
-            // lets the polyline flex and settle naturally.
+            // Match Bandage's "nearby pieces" feel for non-linear components:
+            // the grabbed physics point follows the cursor exactly, while
+            // progressively more distant points on the same contig move less.
             let start = self.node_pts_start[v];
             let count = self.node_pts_count[v];
             let grabbed_chain_idx = pi - start;
@@ -1165,6 +1176,13 @@ impl Layout {
             }
             let desired = self.springs_desired[i];
             let stiff = self.springs_stiff[i];
+            if attractor.is_some() && stiff == SPRING_LINEAR_BEND {
+                // The long cross-junction bend spring exists to restore the
+                // overview shape after editing. Applying it while the pointer
+                // is held makes neighbouring linear segments feel unnaturally
+                // rubber-banded to the grabbed contig.
+                continue;
+            }
             let dx = self.positions[pj][0] - self.positions[pi][0];
             let dy = self.positions[pj][1] - self.positions[pi][1];
             let dist = (dx * dx + dy * dy).sqrt().max(0.001);
@@ -1590,6 +1608,29 @@ mod tests {
             end_move < grabbed_move,
             "drag falloff should let the grabbed contig bend instead of translating rigidly"
         );
+    }
+
+    #[test]
+    fn dragging_linear_component_moves_selected_contig_rigidly() {
+        use Strand::Forward as F;
+        let graph = graph(&[1200.0, 1200.0, 1200.0], &[(0, F, 1, F), (1, F, 2, F)]);
+        let mut layout = Layout::new_with_graph(&graph);
+        assert!(layout.linear[layout.comp_ids[1]]);
+
+        let start = layout.node_pts_start[1];
+        let count = layout.node_pts_count[1];
+        let before = layout.positions[start..start + count].to_vec();
+        let grabbed = start;
+        let target = [
+            layout.positions[grabbed][0] + 400.0,
+            layout.positions[grabbed][1] + 150.0,
+        ];
+        layout.drag_to(target, grabbed);
+
+        for (old, new) in before.iter().zip(&layout.positions[start..start + count]) {
+            assert!((new[0] - old[0] - 400.0).abs() < 0.001);
+            assert!((new[1] - old[1] - 150.0).abs() < 0.001);
+        }
     }
 
     #[test]
