@@ -237,6 +237,14 @@ fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
 
 fn solve_component(work: ComponentWork) -> ComponentResult {
     let node_count = work.global_nodes.len();
+    // Keep runs reproducible while ensuring isomorphic components do not all
+    // start from the exact same local random state.
+    let component_seed = work
+        .global_nodes
+        .iter()
+        .fold(0xA076_1D64_78BD_642Fu64, |seed, &node| {
+            splitmix64(seed ^ (node as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        });
     let positions = match node_count {
         0 => Vec::new(),
         1 => vec![[0.0, 0.0]],
@@ -244,7 +252,7 @@ fn solve_component(work: ComponentWork) -> ComponentResult {
             let length = work.edges.first().map_or(100.0, |edge| edge.desired);
             vec![[-0.5 * length, 0.0], [0.5 * length, 0.0]]
         }
-        _ => solve_multilevel(node_count, work.edges),
+        _ => solve_multilevel(node_count, work.edges, component_seed),
     };
 
     ComponentResult {
@@ -253,7 +261,7 @@ fn solve_component(work: ComponentWork) -> ComponentResult {
     }
 }
 
-fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
+fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) -> Vec<Pos2> {
     let mut levels = vec![Level {
         node_count,
         edges,
@@ -265,7 +273,8 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
         && levels.len() < MAX_LEVELS
     {
         let level_index = levels.len() - 1;
-        let (coarse, prolongation) = solar_coarsen(&levels[level_index]);
+        let (coarse, prolongation) =
+            solar_coarsen(&levels[level_index], component_seed ^ level_index as u64);
         if coarse.node_count >= levels[level_index].node_count {
             break;
         }
@@ -279,7 +288,8 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
 
     let coarsest = &levels[max_level];
     let natural = mean_edge_length(coarsest).max(5.0);
-    let mut positions = deterministic_random_seed(coarsest.node_count, natural);
+    let mut positions =
+        deterministic_random_seed(coarsest.node_count, natural, component_seed);
     let iterations = multilevel_iterations(
         max_level,
         max_level,
@@ -294,7 +304,12 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
             .prolongation
             .as_ref()
             .expect("fine level must contain prolongation metadata");
-        positions = prolong_positions(level, prolongation, &positions, level_index as u64);
+        positions = prolong_positions(
+            level,
+            prolongation,
+            &positions,
+            component_seed ^ (level_index as u64).rotate_left(17),
+        );
         let iterations = multilevel_iterations(
             level_index,
             max_level,
@@ -330,7 +345,7 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>) -> Vec<Pos2> {
     positions
 }
 
-fn solar_coarsen(level: &Level) -> (Level, Prolongation) {
+fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
     let adjacency = Adjacency::build(level.node_count, &level.edges);
 
     // OGDF's gcNonUniformProbLowerMass favours low star-mass nodes as suns.
@@ -348,7 +363,7 @@ fn solar_coarsen(level: &Level) -> (Level, Prolongation) {
     candidates.sort_unstable_by_key(|&node| {
         (
             star_mass[node],
-            splitmix64(node as u64 ^ 0x31D0_8C59_EA22_4A9B),
+            splitmix64(node as u64 ^ salt ^ 0x31D0_8C59_EA22_4A9B),
         )
     });
 
@@ -818,7 +833,7 @@ fn mean_edge_length(level: &Level) -> f32 {
     level.edges.iter().map(|edge| edge.desired).sum::<f32>() / level.edges.len() as f32
 }
 
-fn deterministic_random_seed(node_count: usize, natural: f32) -> Vec<Pos2> {
+fn deterministic_random_seed(node_count: usize, natural: f32, salt: u64) -> Vec<Pos2> {
     // OGDF's zero-sized nodes give an initial box of roughly 11*n. That is
     // excessive for very large coarse edge lengths, so retain the same random
     // square idea while scaling it to graph size and ideal edge length.
@@ -828,10 +843,10 @@ fn deterministic_random_seed(node_count: usize, natural: f32) -> Vec<Pos2> {
     (0..node_count)
         .map(|node| {
             let x = unit_from_hash(splitmix64(
-                node as u64 ^ 0x69D5_7FC8_A2E4_7301,
+                node as u64 ^ salt ^ 0x69D5_7FC8_A2E4_7301,
             ));
             let y = unit_from_hash(splitmix64(
-                node as u64 ^ 0xD2B7_4407_B1CE_6E93,
+                node as u64 ^ salt.rotate_left(29) ^ 0xD2B7_4407_B1CE_6E93,
             ));
             [(x - 0.5) * side, (y - 0.5) * side]
         })
@@ -1309,7 +1324,7 @@ mod tests {
             hierarchy_mass: vec![1; 8],
             prolongation: None,
         };
-        let (coarse, _) = solar_coarsen(&level);
+        let (coarse, _) = solar_coarsen(&level, 0);
         assert!(coarse.node_count < level.node_count);
         assert!(coarse.edges.iter().all(|edge| edge.desired >= 100.0));
     }
