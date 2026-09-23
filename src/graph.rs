@@ -322,7 +322,10 @@ fn component_selection(
             let root = dsu.find(segment);
             sizes[root] += 1;
             total_lengths[root] += gfa.segments[segment].length as u128;
-            if let Some(depth) = gfa.segments[segment].depth.filter(|depth| depth.is_finite()) {
+            if let Some(depth) = gfa.segments[segment]
+                .depth
+                .filter(|depth| depth.is_finite())
+            {
                 depth_sums[root] += depth;
                 depth_counts[root] += 1;
             }
@@ -405,10 +408,8 @@ fn component_selection(
             ComponentSort::SegmentCount => sizes[a].cmp(&sizes[b]),
             ComponentSort::TotalLength => total_lengths[a].cmp(&total_lengths[b]),
             ComponentSort::MeanDepth => {
-                let a_depth = (depth_counts[a] > 0)
-                    .then(|| depth_sums[a] / depth_counts[a] as f64);
-                let b_depth = (depth_counts[b] > 0)
-                    .then(|| depth_sums[b] / depth_counts[b] as f64);
+                let a_depth = (depth_counts[a] > 0).then(|| depth_sums[a] / depth_counts[a] as f64);
+                let b_depth = (depth_counts[b] > 0).then(|| depth_sums[b] / depth_counts[b] as f64);
                 match (a_depth, b_depth) {
                     (Some(a), Some(b)) => a.total_cmp(&b),
                     (Some(_), None) => return std::cmp::Ordering::Less,
@@ -506,8 +507,24 @@ mod tests {
 
     fn test_gfa() -> GfaGraph {
         let lengths = [1000, 300, 300, 100, 100, 100, 50];
-        let depths = [Some(100.0), Some(10.0), Some(10.0), Some(20.0), Some(20.0), Some(20.0), None];
-        let read_counts = [Some(1), Some(100), Some(100), Some(10), Some(10), Some(10), None];
+        let depths = [
+            Some(100.0),
+            Some(10.0),
+            Some(10.0),
+            Some(20.0),
+            Some(20.0),
+            Some(20.0),
+            None,
+        ];
+        let read_counts = [
+            Some(1),
+            Some(100),
+            Some(100),
+            Some(10),
+            Some(10),
+            Some(10),
+            None,
+        ];
         let segments = (0..7)
             .map(|i| Segment {
                 id: i,
@@ -529,6 +546,7 @@ mod tests {
         };
         use Strand::{Forward as F, Reverse as R};
         GfaGraph {
+            diagnostics: Vec::new(),
             mmap: MmapMut::map_anon(1).unwrap().make_read_only().unwrap(),
             version: GfaVersion::Unspecified,
             headers: Vec::new(),
@@ -582,11 +600,13 @@ mod tests {
 
         let segment_two = graph.seg_to_node[&2];
         let segment_six = graph.seg_to_node[&6];
-        assert!(graph
-            .components
-            .iter()
-            .any(|component| component.nodes.contains(&segment_two)
-                && component.nodes.contains(&segment_six)));
+        assert!(
+            graph
+                .components
+                .iter()
+                .any(|component| component.nodes.contains(&segment_two)
+                    && component.nodes.contains(&segment_six))
+        );
     }
 
     #[test]
@@ -596,8 +616,10 @@ mod tests {
         let graph = ViewGraph::from_gfa(&gfa, &FilterParams::default());
         assert_eq!(&names(&graph)[..3], &["3", "4", "5"]);
 
-        let mut filter = FilterParams::default();
-        filter.component_topology = ComponentTopology::Circular;
+        let mut filter = FilterParams {
+            component_topology: ComponentTopology::Circular,
+            ..Default::default()
+        };
         assert_eq!(names(&ViewGraph::from_gfa(&gfa, &filter)), ["0"]);
 
         filter.component_topology = ComponentTopology::Linear;
@@ -619,19 +641,32 @@ mod tests {
     #[test]
     fn components_support_multiple_sort_metrics_and_directions() {
         let gfa = test_gfa();
-        let mut filter = FilterParams::default();
-
-        filter.component_sort = ComponentSort::TotalLength;
-        assert_eq!(&names(&ViewGraph::from_gfa(&gfa, &filter))[..3], &["0", "1", "2"]);
+        let mut filter = FilterParams {
+            component_sort: ComponentSort::TotalLength,
+            ..Default::default()
+        };
+        assert_eq!(
+            &names(&ViewGraph::from_gfa(&gfa, &filter))[..3],
+            &["0", "1", "2"]
+        );
 
         filter.component_sort = ComponentSort::MeanDepth;
-        assert_eq!(&names(&ViewGraph::from_gfa(&gfa, &filter))[..4], &["0", "3", "4", "5"]);
+        assert_eq!(
+            &names(&ViewGraph::from_gfa(&gfa, &filter))[..4],
+            &["0", "3", "4", "5"]
+        );
 
         filter.component_sort = ComponentSort::TotalReadCount;
-        assert_eq!(&names(&ViewGraph::from_gfa(&gfa, &filter))[..3], &["1", "2", "3"]);
+        assert_eq!(
+            &names(&ViewGraph::from_gfa(&gfa, &filter))[..3],
+            &["1", "2", "3"]
+        );
 
         filter.component_sort = ComponentSort::SegmentCount;
         filter.component_sort_order = ComponentSortOrder::Ascending;
-        assert_eq!(&names(&ViewGraph::from_gfa(&gfa, &filter))[..2], &["0", "6"]);
+        assert_eq!(
+            &names(&ViewGraph::from_gfa(&gfa, &filter))[..2],
+            &["0", "6"]
+        );
     }
 }

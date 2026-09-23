@@ -10,12 +10,17 @@
 use std::{
     collections::HashMap,
     fs::File,
+    io::{Read, Seek, SeekFrom, Write},
     ops::Range,
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
+use flate2::read::MultiGzDecoder;
 use memmap2::Mmap;
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -78,8 +83,7 @@ pub struct Tag {
 #[allow(dead_code)]
 impl Tag {
     pub fn name_eq(&self, name: &[u8; 2]) -> bool {
-        self.name[0].eq_ignore_ascii_case(&name[0])
-            && self.name[1].eq_ignore_ascii_case(&name[1])
+        self.name[0].eq_ignore_ascii_case(&name[0]) && self.name[1].eq_ignore_ascii_case(&name[1])
     }
 }
 
@@ -184,6 +188,7 @@ pub struct GfaPath {
     pub steps: Range<usize>,
     /// Raw overlap/distance list in the mmap; empty for *.
     pub overlaps_range: Range<usize>,
+    pub tag_range: Range<usize>,
 }
 
 #[allow(dead_code)]
@@ -204,6 +209,20 @@ pub struct Walk {
     pub sequence_end: Option<u64>,
     /// Range into GfaGraph::walk_steps.
     pub steps: Range<usize>,
+    pub tag_range: Range<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Warning,
+}
+
+/// A recoverable input problem. Line numbers are one-based.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParseDiagnostic {
+    pub line: usize,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
 }
 
 /// The parsed GFA graph.
@@ -211,6 +230,7 @@ pub struct GfaGraph {
     /// Memory-mapped file kept alive as long as the graph lives.
     pub mmap: Mmap,
     pub version: GfaVersion,
+    pub diagnostics: Vec<ParseDiagnostic>,
     #[allow(dead_code)]
     pub headers: Vec<Header>,
     pub segments: Vec<Segment>,
@@ -234,6 +254,21 @@ pub struct GfaGraph {
 
 #[allow(dead_code)]
 impl GfaGraph {
+    pub fn diagnostic_summary(&self) -> Option<String> {
+        self.diagnostics.first().map(|first| {
+            format!(
+                "{} input warning(s); line {}: {}",
+                if self.diagnostics.len() > MAX_DIAGNOSTICS {
+                    format!("more than {MAX_DIAGNOSTICS}")
+                } else {
+                    self.diagnostics.len().to_string()
+                },
+                first.line,
+                first.message
+            )
+        })
+    }
+
     pub fn segment_sequence(&self, seg: &Segment) -> &[u8] {
         seg.sequence(&self.mmap)
     }
@@ -243,17 +278,19 @@ impl GfaGraph {
     }
 
     pub fn total_sequence_length(&self) -> usize {
-        self.segments.iter().map(|s| s.length).sum()
+        self.segments
+            .iter()
+            .fold(0usize, |total, s| total.saturating_add(s.length))
     }
 
     pub fn n50(&self) -> usize {
-        let total = self.total_sequence_length();
+        let total: u128 = self.segments.iter().map(|s| s.length as u128).sum();
         let mut lengths: Vec<usize> = self.segments.iter().map(|s| s.length).collect();
         lengths.sort_unstable_by(|a, b| b.cmp(a));
-        let mut cumsum = 0usize;
+        let mut cumsum = 0u128;
         for l in &lengths {
-            cumsum += l;
-            if cumsum * 2 >= total {
+            cumsum += *l as u128;
+            if cumsum >= total.div_ceil(2) {
                 return *l;
             }
         }
@@ -331,6 +368,7 @@ struct RawPath {
     name: Arc<str>,
     steps: Range<usize>,
     overlaps_range: Range<usize>,
+    tag_range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -347,25 +385,98 @@ struct RawWalk {
     sequence_start: Option<u64>,
     sequence_end: Option<u64>,
     steps: Range<usize>,
+    tag_range: Range<usize>,
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
 
 pub fn parse_gfa<P: AsRef<Path>>(path: P) -> Result<GfaGraph> {
-    let file = File::open(&path)
-        .with_context(|| format!("Cannot open {:?}", path.as_ref()))?;
-    let mmap = unsafe { Mmap::map(&file) }.context("mmap failed")?;
-
-    parse_gfa_bytes(mmap)
+    parse_gfa_with_control(path, &AtomicBool::new(false))
 }
 
-fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
-    let bytes = &mmap[..];
-    let version = detect_gfa_version(bytes);
+/// Plain inputs stay memory-mapped. Gzip inputs are inflated into an anonymous
+/// temporary file, keeping decompressed bytes out of the process heap.
+pub fn parse_gfa_with_control<P: AsRef<Path>>(path: P, cancel: &AtomicBool) -> Result<GfaGraph> {
+    check_cancelled(cancel)?;
+    let mut file = File::open(&path).with_context(|| format!("Cannot open {:?}", path.as_ref()))?;
+    let mut magic = [0u8; 2];
+    let count = file.read(&mut magic).context("Cannot read GFA input")?;
+    file.seek(SeekFrom::Start(0))?;
+    if count == 2 && magic == [0x1f, 0x8b] {
+        file = decompress_gzip(file, cancel, MAX_DECOMPRESSED_BYTES)?;
+    }
+    anyhow::ensure!(file.metadata()?.len() > 0, "GFA input is empty");
+    let mmap = unsafe { Mmap::map(&file) }.context("Cannot memory-map GFA input")?;
+    parse_gfa_bytes_with_control(mmap, cancel)
+}
 
-    if version == GfaVersion::Gfa2_0
-        || (version == GfaVersion::Unspecified && looks_like_unheaded_gfa2(bytes))
-    {
+const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_DIAGNOSTICS: usize = 1000;
+
+fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "GFA loading cancelled");
+    Ok(())
+}
+
+fn decompress_gzip<R: Read>(file: R, cancel: &AtomicBool, limit: u64) -> Result<File> {
+    check_cancelled(cancel)?;
+    let mut decoder = MultiGzDecoder::new(file);
+    let mut output = tempfile::tempfile().context("Cannot create temporary file for gzip input")?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        check_cancelled(cancel)?;
+        let count = decoder
+            .read(&mut buffer)
+            .context("Cannot decompress gzip GFA input")?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        anyhow::ensure!(
+            total <= limit,
+            "Decompressed GFA exceeds the {} GiB safety limit",
+            limit / (1024 * 1024 * 1024)
+        );
+        output
+            .write_all(&buffer[..count])
+            .context("Cannot write decompressed GFA temporary file")?;
+    }
+    check_cancelled(cancel)?;
+    output.flush()?;
+    output.seek(SeekFrom::Start(0))?;
+    Ok(output)
+}
+
+fn warn(diagnostics: &mut Vec<ParseDiagnostic>, line: usize, message: impl Into<String>) {
+    if diagnostics.len() < MAX_DIAGNOSTICS {
+        diagnostics.push(ParseDiagnostic {
+            line,
+            severity: DiagnosticSeverity::Warning,
+            message: message.into(),
+        });
+    } else if diagnostics.len() == MAX_DIAGNOSTICS {
+        diagnostics.push(ParseDiagnostic {
+            line,
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "Further warnings omitted after the first {MAX_DIAGNOSTICS} input problems"
+            ),
+        });
+    }
+}
+
+#[cfg(test)]
+fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
+    parse_gfa_bytes_with_control(mmap, &AtomicBool::new(false))
+}
+
+fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGraph> {
+    check_cancelled(cancel)?;
+    let bytes = &mmap[..];
+    let version = detect_gfa_version(bytes, cancel)?;
+
+    if version == GfaVersion::Gfa2_0 {
         anyhow::bail!(
             "GFA2 input detected. Graphite currently supports GFA1 records; GFA2 S/E/F/G/O/U records require a separate parser."
         );
@@ -382,12 +493,19 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
     let mut raw_walk_steps = Vec::new();
     let mut tags = Vec::new();
     let mut name_index: HashMap<Arc<str>, usize> = HashMap::new();
+    let mut diagnostics = Vec::new();
 
     let mut pos = 0usize;
+    let mut line_number = 0usize;
     while pos < bytes.len() {
+        check_cancelled(cancel)?;
+        line_number += 1;
         let line_start = pos;
         while pos < bytes.len() && bytes[pos] != b'\n' {
             pos += 1;
+            if pos & 0xffff == 0 {
+                check_cancelled(cancel)?;
+            }
         }
         let mut line_end = pos;
         if line_end > line_start && bytes[line_end - 1] == b'\r' {
@@ -402,40 +520,65 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
             continue;
         }
 
+        if version == GfaVersion::Unspecified && line[0] == b'S' && looks_like_unheaded_gfa2(line) {
+            anyhow::bail!(
+                "GFA2 input detected on line {line_number}. Graphite currently supports GFA1 records."
+            );
+        }
+        if let Some(problem) = validate_record(line) {
+            warn(&mut diagnostics, line_number, problem);
+            continue;
+        }
+        validate_optional_fields(line, line_number, &mut diagnostics);
+
         match line[0] {
             b'H' => headers.push(parse_h_line(line, line_start, &mut tags)),
             b'S' => {
                 let id = segments.len();
                 if let Some(seg) = parse_s_line(line, line_start, &mmap, id, &mut tags) {
-                    if name_index.insert(seg.name.clone(), id).is_some() {
-                        log::warn!("duplicate GFA segment name '{}'; later segment wins", seg.name);
-                    }
+                    anyhow::ensure!(
+                        name_index.insert(seg.name.clone(), id).is_none(),
+                        "Duplicate GFA segment name '{}' on line {line_number}",
+                        seg.name
+                    );
                     segments.push(seg);
+                } else {
+                    warn(&mut diagnostics, line_number, "Malformed S record skipped");
                 }
             }
             b'L' => {
                 if let Some(link) = parse_l_line(line, line_start, &mut tags) {
-                    links_raw.push(link);
+                    links_raw.push((line_number, link));
+                } else {
+                    warn(&mut diagnostics, line_number, "Malformed L record skipped");
                 }
             }
             b'J' => {
                 if let Some(jump) = parse_j_line(line, line_start, &mut tags) {
-                    jumps_raw.push(jump);
+                    jumps_raw.push((line_number, jump));
+                } else {
+                    warn(&mut diagnostics, line_number, "Malformed J record skipped");
                 }
             }
             b'C' => {
                 if let Some(containment) = parse_c_line(line, line_start, &mut tags) {
-                    containments_raw.push(containment);
+                    containments_raw.push((line_number, containment));
+                } else {
+                    warn(&mut diagnostics, line_number, "Malformed C record skipped");
                 }
             }
             b'P' => {
-                if let Some(path) = parse_p_line(line, line_start, &mut raw_path_steps) {
-                    paths_raw.push(path);
+                if let Some(path) = parse_p_line(line, line_start, &mut raw_path_steps, &mut tags) {
+                    paths_raw.push((line_number, path));
+                } else {
+                    warn(&mut diagnostics, line_number, "Malformed P record skipped");
                 }
             }
             b'W' => {
-                if let Some(walk) = parse_w_line(line, line_start, &mut raw_walk_steps) {
-                    walks_raw.push(walk);
+                if let Some(walk) = parse_w_line(line, line_start, &mut raw_walk_steps, &mut tags) {
+                    walks_raw.push((line_number, walk));
+                } else {
+                    warn(&mut diagnostics, line_number, "Malformed W record skipped");
                 }
             }
             _ => {}
@@ -444,12 +587,18 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
 
     let mut skipped_links = 0usize;
     let mut links = Vec::with_capacity(links_raw.len());
-    for raw in links_raw {
+    for (line_number, raw) in links_raw {
+        check_cancelled(cancel)?;
         let (Some(from), Some(to)) = (
             resolve_name(&mmap, &raw.from_name, &name_index),
             resolve_name(&mmap, &raw.to_name, &name_index),
         ) else {
             skipped_links += 1;
+            warn(
+                &mut diagnostics,
+                line_number,
+                "L record skipped: reference to an unknown segment",
+            );
             continue;
         };
         links.push(Link {
@@ -464,12 +613,18 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
 
     let mut skipped_jumps = 0usize;
     let mut jumps = Vec::with_capacity(jumps_raw.len());
-    for raw in jumps_raw {
+    for (line_number, raw) in jumps_raw {
+        check_cancelled(cancel)?;
         let (Some(from), Some(to)) = (
             resolve_name(&mmap, &raw.from_name, &name_index),
             resolve_name(&mmap, &raw.to_name, &name_index),
         ) else {
             skipped_jumps += 1;
+            warn(
+                &mut diagnostics,
+                line_number,
+                "J record skipped: reference to an unknown segment",
+            );
             continue;
         };
         jumps.push(Jump {
@@ -485,12 +640,18 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
 
     let mut skipped_containments = 0usize;
     let mut containments = Vec::with_capacity(containments_raw.len());
-    for raw in containments_raw {
+    for (line_number, raw) in containments_raw {
+        check_cancelled(cancel)?;
         let (Some(container), Some(contained)) = (
             resolve_name(&mmap, &raw.container_name, &name_index),
             resolve_name(&mmap, &raw.contained_name, &name_index),
         ) else {
             skipped_containments += 1;
+            warn(
+                &mut diagnostics,
+                line_number,
+                "C record skipped: reference to an unknown segment",
+            );
             continue;
         };
         containments.push(Containment {
@@ -507,10 +668,14 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
     let mut skipped_paths = 0usize;
     let mut paths = Vec::with_capacity(paths_raw.len());
     let mut path_steps = Vec::with_capacity(raw_path_steps.len());
-    for raw in paths_raw {
+    for (line_number, raw) in paths_raw {
+        check_cancelled(cancel)?;
         let start = path_steps.len();
         let mut valid = true;
-        for step in &raw_path_steps[raw.steps.clone()] {
+        for (step_index, step) in raw_path_steps[raw.steps.clone()].iter().enumerate() {
+            if step_index & 0xffff == 0 {
+                check_cancelled(cancel)?;
+            }
             let Some(segment) = resolve_name(&mmap, &step.name_range, &name_index) else {
                 valid = false;
                 break;
@@ -526,20 +691,30 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
                 name: raw.name,
                 steps: start..path_steps.len(),
                 overlaps_range: raw.overlaps_range,
+                tag_range: raw.tag_range,
             });
         } else {
             path_steps.truncate(start);
             skipped_paths += 1;
+            warn(
+                &mut diagnostics,
+                line_number,
+                "P record skipped: reference to an unknown segment",
+            );
         }
     }
 
     let mut skipped_walks = 0usize;
     let mut walks = Vec::with_capacity(walks_raw.len());
     let mut walk_steps = Vec::with_capacity(raw_walk_steps.len());
-    for raw in walks_raw {
+    for (line_number, raw) in walks_raw {
+        check_cancelled(cancel)?;
         let start = walk_steps.len();
         let mut valid = true;
-        for step in &raw_walk_steps[raw.steps.clone()] {
+        for (step_index, step) in raw_walk_steps[raw.steps.clone()].iter().enumerate() {
+            if step_index & 0xffff == 0 {
+                check_cancelled(cancel)?;
+            }
             let Some(segment) = resolve_name(&mmap, &step.name_range, &name_index) else {
                 valid = false;
                 break;
@@ -557,10 +732,16 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
                 sequence_start: raw.sequence_start,
                 sequence_end: raw.sequence_end,
                 steps: start..walk_steps.len(),
+                tag_range: raw.tag_range,
             });
         } else {
             walk_steps.truncate(start);
             skipped_walks += 1;
+            warn(
+                &mut diagnostics,
+                line_number,
+                "W record skipped: reference to an unknown segment",
+            );
         }
     }
 
@@ -570,6 +751,9 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
         );
     }
 
+    check_cancelled(cancel)?;
+    anyhow::ensure!(!segments.is_empty(), "No valid GFA segments found in input");
+    diagnostics.sort_by_key(|diagnostic| diagnostic.line);
     let sequence_segment_count = segments
         .iter()
         .filter(|segment| !segment.seq_range.is_empty())
@@ -578,6 +762,7 @@ fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
     Ok(GfaGraph {
         mmap,
         version,
+        diagnostics,
         headers,
         segments,
         sequence_segment_count,
@@ -605,8 +790,9 @@ fn parse_version_value(value: &[u8]) -> GfaVersion {
     }
 }
 
-fn detect_gfa_version(bytes: &[u8]) -> GfaVersion {
+fn detect_gfa_version(bytes: &[u8], cancel: &AtomicBool) -> Result<GfaVersion> {
     for mut line in bytes.split(|&b| b == b'\n') {
+        check_cancelled(cancel)?;
         if line.last() == Some(&b'\r') {
             line = &line[..line.len() - 1];
         }
@@ -626,11 +812,11 @@ fn detect_gfa_version(bytes: &[u8]) -> GfaVersion {
                 && field[3].eq_ignore_ascii_case(&b'Z')
                 && field[4] == b':'
             {
-                return parse_version_value(&field[5..]);
+                return Ok(parse_version_value(&field[5..]));
             }
         }
     }
-    GfaVersion::Unspecified
+    Ok(GfaVersion::Unspecified)
 }
 
 fn looks_like_unheaded_gfa2(bytes: &[u8]) -> bool {
@@ -664,6 +850,202 @@ fn looks_like_unheaded_gfa2(bytes: &[u8]) -> bool {
 
 // ── Line parsers ─────────────────────────────────────────────────────────────
 
+/// Validate required fields before the permissive record parsers run, so a
+/// truncated record cannot quietly acquire invented defaults.
+fn validate_record(line: &[u8]) -> Option<String> {
+    let record = *line.first()?;
+    if !matches!(record, b'H' | b'S' | b'L' | b'J' | b'C' | b'P' | b'W') {
+        return None;
+    }
+    let result = (|| -> std::result::Result<(), &'static str> {
+        let mut fields = tab_fields(line);
+        if fields.next() != Some(&line[..1]) {
+            return Err("record type must be one character followed by a tab");
+        }
+        let mut next = || fields.next().ok_or("missing required field");
+        match record {
+            b'H' => {}
+            b'S' => {
+                if !valid_name(next()?) {
+                    return Err("invalid segment name");
+                }
+                let sequence = next()?;
+                if sequence != b"*"
+                    && !sequence
+                        .iter()
+                        .all(|b| b.is_ascii_alphabetic() || matches!(b, b'=' | b'.'))
+                {
+                    return Err("invalid segment sequence");
+                }
+            }
+            b'L' | b'J' | b'C' => {
+                if !valid_name(next()?) {
+                    return Err("invalid source segment name");
+                }
+                if !matches!(next()?, b"+" | b"-") {
+                    return Err("invalid source orientation");
+                }
+                if !valid_name(next()?) {
+                    return Err("invalid target segment name");
+                }
+                if !matches!(next()?, b"+" | b"-") {
+                    return Err("invalid target orientation");
+                }
+                if record == b'C'
+                    && std::str::from_utf8(next()?)
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .is_none()
+                {
+                    return Err("invalid containment position");
+                }
+                let value = next()?;
+                if record == b'J' {
+                    if value != b"*"
+                        && std::str::from_utf8(value)
+                            .ok()
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .is_none()
+                    {
+                        return Err("invalid jump distance");
+                    }
+                } else if !valid_cigar(value) {
+                    return Err("invalid overlap CIGAR");
+                }
+            }
+            b'P' => {
+                if !valid_name(next()?) {
+                    return Err("invalid path name");
+                }
+                next()?;
+                if next()?.is_empty() {
+                    return Err("empty path overlap list");
+                }
+            }
+            b'W' => {
+                if next()?.is_empty() {
+                    return Err("empty walk sample ID");
+                }
+                if std::str::from_utf8(next()?)
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .is_none()
+                {
+                    return Err("invalid haplotype index");
+                }
+                if next()?.is_empty() {
+                    return Err("empty walk sequence ID");
+                }
+                let start = parse_optional_u64(next()?).ok_or("invalid walk start coordinate")?;
+                let end = parse_optional_u64(next()?).ok_or("invalid walk end coordinate")?;
+                if matches!((start, end), (Some(a), Some(b)) if a > b) {
+                    return Err("walk end precedes start");
+                }
+                next()?;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    })();
+    result
+        .err()
+        .map(|reason| format!("Malformed {} record skipped: {reason}", record as char))
+}
+
+fn valid_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && !matches!(name[0], b'*' | b'=')
+        && name.iter().all(|&b| (33..=126).contains(&b))
+        && !name.windows(2).any(|pair| pair == b"+," || pair == b"-,")
+}
+
+fn valid_cigar(value: &[u8]) -> bool {
+    if value == b"*" {
+        return true;
+    }
+    let mut digits = false;
+    for &byte in value {
+        if byte.is_ascii_digit() {
+            digits = true;
+        } else if digits
+            && matches!(
+                byte,
+                b'M' | b'I' | b'D' | b'N' | b'S' | b'H' | b'P' | b'=' | b'X'
+            )
+        {
+            digits = false;
+        } else {
+            return false;
+        }
+    }
+    !value.is_empty() && !digits
+}
+
+fn validate_optional_fields(
+    line: &[u8],
+    line_number: usize,
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) {
+    let required = match line[0] {
+        b'H' => 1,
+        b'S' => 3,
+        b'L' | b'J' => 6,
+        b'C' | b'W' => 7,
+        b'P' => 4,
+        _ => return,
+    };
+    let sequence = (line[0] == b'S').then(|| tab_fields(line).nth(2).unwrap());
+    if sequence.is_some_and(|sequence| sequence.is_empty()) {
+        warn(
+            diagnostics,
+            line_number,
+            "Empty segment sequence treated as missing; use '*' for a sequence-less segment",
+        );
+    }
+    for field in tab_fields(line).skip(required) {
+        if field.len() < 5
+            || field[2] != b':'
+            || field[4] != b':'
+            || !field[0].is_ascii_alphabetic()
+            || !field[1].is_ascii_alphanumeric()
+            || !matches!(field[3], b'A' | b'i' | b'f' | b'Z' | b'J' | b'H' | b'B')
+        {
+            warn(diagnostics, line_number, "Malformed optional tag ignored");
+            continue;
+        }
+        let value = std::str::from_utf8(&field[5..]).ok();
+        if field[..2].eq_ignore_ascii_case(b"LN") && field[3] == b'i' && sequence.is_some() {
+            match value.and_then(|v| v.parse::<usize>().ok()) {
+                Some(length)
+                    if sequence.is_some_and(|seq| {
+                        !seq.is_empty() && seq != b"*" && seq.len() != length
+                    }) =>
+                {
+                    warn(
+                        diagnostics,
+                        line_number,
+                        "LN tag disagrees with embedded sequence length; using the sequence length",
+                    );
+                }
+                None => warn(diagnostics, line_number, "Invalid LN length ignored"),
+                _ => {}
+            }
+        }
+        if (field[..2].eq_ignore_ascii_case(b"DP") || field[..2].eq_ignore_ascii_case(b"RD"))
+            && matches!(field[3], b'f' | b'i')
+            && value
+                .and_then(|v| v.parse::<f64>().ok())
+                .is_none_or(|v| !v.is_finite() || v < 0.0)
+        {
+            warn(
+                diagnostics,
+                line_number,
+                "Invalid depth value ignored (expected a finite nonnegative number)",
+            );
+        }
+    }
+}
+
 fn tab_fields(line: &[u8]) -> impl Iterator<Item = &[u8]> {
     line.split(|&b| b == b'\t')
 }
@@ -683,7 +1065,13 @@ fn non_star_range(line: &[u8], line_start: usize, field: &[u8]) -> Range<usize> 
 }
 
 fn parse_tag_field(line: &[u8], line_start: usize, field: &[u8]) -> Option<Tag> {
-    if field.len() < 5 || field[2] != b':' || field[4] != b':' {
+    if field.len() < 5
+        || field[2] != b':'
+        || field[4] != b':'
+        || !field[0].is_ascii_alphabetic()
+        || !field[1].is_ascii_alphanumeric()
+        || !matches!(field[3], b'A' | b'i' | b'f' | b'Z' | b'J' | b'H' | b'B')
+    {
         return None;
     }
     Some(Tag {
@@ -719,7 +1107,11 @@ fn parse_s_line(
 
     let name: Arc<str> = std::str::from_utf8(name_bytes).ok()?.into();
     let seq_range = non_star_range(line, line_start, seq_bytes);
-    let sequence_length = if seq_bytes == b"*" { 0 } else { seq_bytes.len() };
+    let sequence_length = if seq_bytes == b"*" {
+        0
+    } else {
+        seq_bytes.len()
+    };
 
     let mut seg_length = sequence_length;
     let mut dp_depth = None;
@@ -741,13 +1133,21 @@ fn parse_s_line(
 
         match (&upper_name, value_type, value_str) {
             (b"LN", b'i', Some(value)) => {
-                seg_length = value.parse().unwrap_or(sequence_length);
+                if seq_bytes == b"*" || seq_bytes.is_empty() {
+                    seg_length = value.parse().unwrap_or(sequence_length);
+                }
             }
             (b"DP", b'f' | b'i', Some(value)) => {
-                dp_depth = value.parse().ok();
+                dp_depth = value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0);
             }
             (b"RD", b'f' | b'i', Some(value)) => {
-                read_depth = value.parse().ok();
+                read_depth = value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0);
             }
             (b"RC", b'i', Some(value)) => {
                 read_count = value.parse().ok();
@@ -841,11 +1241,7 @@ fn parse_j_line(line: &[u8], line_start: usize, tags: &mut Vec<Tag>) -> Option<R
     })
 }
 
-fn parse_c_line(
-    line: &[u8],
-    line_start: usize,
-    tags: &mut Vec<Tag>,
-) -> Option<RawContainment> {
+fn parse_c_line(line: &[u8], line_start: usize, tags: &mut Vec<Tag>) -> Option<RawContainment> {
     let mut fields = tab_fields(line);
     fields.next();
     let container_name = range_in_line(line, line_start, fields.next()?);
@@ -878,6 +1274,7 @@ fn parse_p_line(
     line: &[u8],
     line_start: usize,
     raw_steps: &mut Vec<RawPathStep>,
+    tags: &mut Vec<Tag>,
 ) -> Option<RawPath> {
     let mut fields = tab_fields(line);
     fields.next();
@@ -890,11 +1287,14 @@ fn parse_p_line(
         raw_steps.truncate(start);
         return None;
     }
+    let tag_start = tags.len();
+    tags.extend(fields.filter_map(|field| parse_tag_field(line, line_start, field)));
 
     Some(RawPath {
         name,
         steps: start..raw_steps.len(),
         overlaps_range: non_star_range(line, line_start, overlaps_field),
+        tag_range: tag_start..tags.len(),
     })
 }
 
@@ -916,8 +1316,12 @@ fn parse_path_step_field(
             None
         } else {
             match field[i] {
-                b',' => Some(PathConnection::Link),
-                b';' => Some(PathConnection::Jump),
+                b',' if i > token_start && matches!(field[i - 1], b'+' | b'-') => {
+                    Some(PathConnection::Link)
+                }
+                b';' if i > token_start && matches!(field[i - 1], b'+' | b'-') => {
+                    Some(PathConnection::Jump)
+                }
                 _ => {
                     i += 1;
                     continue;
@@ -956,6 +1360,7 @@ fn parse_w_line(
     line: &[u8],
     line_start: usize,
     raw_steps: &mut Vec<RawWalkStep>,
+    tags: &mut Vec<Tag>,
 ) -> Option<RawWalk> {
     let mut fields = tab_fields(line);
     fields.next();
@@ -971,6 +1376,8 @@ fn parse_w_line(
         raw_steps.truncate(start);
         return None;
     }
+    let tag_start = tags.len();
+    tags.extend(fields.filter_map(|field| parse_tag_field(line, line_start, field)));
 
     Some(RawWalk {
         sample_id,
@@ -979,6 +1386,7 @@ fn parse_w_line(
         sequence_start,
         sequence_end,
         steps: start..raw_steps.len(),
+        tag_range: tag_start..tags.len(),
     })
 }
 
@@ -1075,9 +1483,7 @@ mod tests {
 
     #[test]
     fn detects_header_version_and_preserves_generic_tags() {
-        let graph = parse(
-            b"H\tVN:Z:1.2\tTS:i:10\nS\ts1\tACGT\tFC:i:7\tKC:i:12\n",
-        );
+        let graph = parse(b"H\tVN:Z:1.2\tTS:i:10\nS\ts1\tACGT\tFC:i:7\tKC:i:12\n");
         assert_eq!(graph.version, GfaVersion::Gfa1_2);
         assert_eq!(graph.headers.len(), 1);
         assert_eq!(graph.segments[0].id, 0);
@@ -1093,11 +1499,9 @@ mod tests {
 
     #[test]
     fn rejects_gfa2_instead_of_misparsing_segment_length_as_sequence() {
-        let error = parse_gfa_bytes(mmap_from(
-            b"H\tVN:Z:2.0\nS\ts1\t4\tACGT\n",
-        ))
-        .err()
-        .expect("GFA2 should be rejected");
+        let error = parse_gfa_bytes(mmap_from(b"H\tVN:Z:2.0\nS\ts1\t4\tACGT\n"))
+            .err()
+            .expect("GFA2 should be rejected");
         assert!(error.to_string().contains("GFA2"));
 
         let error = parse_gfa_bytes(mmap_from(b"S\ts1\t4\tACGT\n"))
@@ -1108,9 +1512,7 @@ mod tests {
 
     #[test]
     fn preserves_link_cigar_and_tags() {
-        let graph = parse(
-            b"H\tVN:Z:1.0\nS\ta\tAAAA\nS\tb\tAAAT\nL\ta\t+\tb\t-\t3M\tMQ:i:60\n",
-        );
+        let graph = parse(b"H\tVN:Z:1.0\nS\ta\tAAAA\nS\tb\tAAAT\nL\ta\t+\tb\t-\t3M\tMQ:i:60\n");
         assert_eq!(graph.links.len(), 1);
         let link = &graph.links[0];
         assert_eq!(graph.link_overlap(link), b"3M");
@@ -1122,9 +1524,7 @@ mod tests {
 
     #[test]
     fn parses_jump_and_shortcut_tag() {
-        let graph = parse(
-            b"H\tVN:Z:1.2\nS\ta\tA\nS\tb\tT\nJ\ta\t+\tb\t-\t1000\tSC:i:1\n",
-        );
+        let graph = parse(b"H\tVN:Z:1.2\nS\ta\tA\nS\tb\tT\nJ\ta\t+\tb\t-\t1000\tSC:i:1\n");
         assert_eq!(graph.jumps.len(), 1);
         let jump = &graph.jumps[0];
         assert_eq!(jump.distance, Some(1000));
@@ -1135,9 +1535,7 @@ mod tests {
 
     #[test]
     fn parses_paths_with_link_and_jump_separators() {
-        let graph = parse(
-            b"H\tVN:Z:1.2\nS\ta\tA\nS\tb\tT\nS\tc\tG\nP\tp1\ta+,b-;c+\t1M,10J\n",
-        );
+        let graph = parse(b"H\tVN:Z:1.2\nS\ta\tA\nS\tb\tT\nS\tc\tG\nP\tp1\ta+,b-;c+\t1M,10J\n");
         assert_eq!(graph.paths.len(), 1);
         let steps = graph.path_steps(&graph.paths[0]);
         assert_eq!(steps.len(), 3);
@@ -1166,9 +1564,27 @@ mod tests {
         assert_eq!(walk.sequence_end, Some(11));
         let steps = graph.walk_steps(walk);
         assert_eq!(steps.len(), 3);
-        assert_eq!(steps[0], OrientedSegment { segment: 0, strand: Strand::Forward });
-        assert_eq!(steps[1], OrientedSegment { segment: 1, strand: Strand::Reverse });
-        assert_eq!(steps[2], OrientedSegment { segment: 2, strand: Strand::Forward });
+        assert_eq!(
+            steps[0],
+            OrientedSegment {
+                segment: 0,
+                strand: Strand::Forward
+            }
+        );
+        assert_eq!(
+            steps[1],
+            OrientedSegment {
+                segment: 1,
+                strand: Strand::Reverse
+            }
+        );
+        assert_eq!(
+            steps[2],
+            OrientedSegment {
+                segment: 2,
+                strand: Strand::Forward
+            }
+        );
     }
 
     #[test]
@@ -1191,5 +1607,188 @@ mod tests {
         let graph = parse(b"H\tVN:Z:1.0\r\nS\ta\tACGT\r\n");
         assert_eq!(graph.version, GfaVersion::Gfa1_0);
         assert_eq!(graph.segment_sequence(&graph.segments[0]), b"ACGT");
+    }
+
+    #[test]
+    fn recovers_empty_sequence_producer_dialect_with_warning() {
+        let graph = parse(b"H\tVN:Z:1.0\nS\tcontig\t\tLN:i:8676\tDP:f:1.0\n");
+        assert_eq!(graph.segments[0].length, 8676);
+        assert_eq!(graph.sequence_segment_count, 0);
+        assert_eq!(graph.diagnostics.len(), 1);
+        assert_eq!(graph.diagnostics[0].line, 2);
+        assert!(
+            graph.diagnostics[0]
+                .message
+                .contains("Empty segment sequence")
+        );
+    }
+
+    #[test]
+    fn reports_malformed_records_and_unknown_references_with_line_numbers() {
+        let graph = parse(b"# comment\nS\ta\tACGT\nS\tbroken\nL\ta\t?\ta\t+\t0M\nL\ta\t+\tmissing\t+\t0M\nP\tp\ta+,missing+\t*\nW\tsample\t0\tchr\t0\t4\t>missing\n");
+        assert_eq!(graph.segments.len(), 1);
+        assert!(graph.links.is_empty());
+        assert!(graph.paths.is_empty());
+        assert!(graph.walks.is_empty());
+        assert_eq!(
+            graph.diagnostics.iter().map(|d| d.line).collect::<Vec<_>>(),
+            vec![3, 4, 5, 6, 7]
+        );
+        assert!(
+            graph.diagnostics[0]
+                .message
+                .contains("missing required field")
+        );
+        assert!(graph.diagnostics[2].message.contains("unknown segment"));
+        assert!(
+            graph
+                .diagnostic_summary()
+                .unwrap()
+                .contains("5 input warning")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_names_instead_of_retargeting_links() {
+        let error = parse_gfa_bytes(mmap_from(b"S\ta\tA\nS\ta\tG\n"))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate GFA segment name 'a' on line 2")
+        );
+    }
+
+    #[test]
+    fn malformed_required_fields_are_skipped_without_invented_defaults() {
+        let graph = parse(b"S\ta\tA\nL\ta\t+\ta\t+\nL\ta\t++\ta\t+\t0M\nJ\ta\t+\ta\t+\tnonsense\nC\ta\t+\ta\t+\t0\tbogus\nW\ts\t0\tchr\t9\t2\t>a\n");
+        assert_eq!(graph.diagnostics.len(), 5);
+        assert!(
+            graph.links.is_empty()
+                && graph.jumps.is_empty()
+                && graph.containments.is_empty()
+                && graph.walks.is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_optional_values_do_not_corrupt_lengths_or_depth() {
+        let graph = parse(b"S\ta\tACGT\tLN:i:99\tDP:f:NaN\nS\tb\t*\tLN:i:12\trd:f:-3\n");
+        assert_eq!(graph.segments[0].length, 4);
+        assert_eq!(graph.segments[1].length, 12);
+        assert!(graph.segments.iter().all(|s| s.depth.is_none()));
+        assert_eq!(graph.diagnostics.len(), 3);
+    }
+
+    #[test]
+    fn retains_optional_path_and_walk_tags_and_names_with_commas() {
+        let graph = parse(b"S\ta,b\tA\nS\tc\tC\nP\tp\ta,b+,c-\t*\tTP:Z:linear\nW\ts\t0\tchr\t0\t1\t>a,b\tXY:B:i,1,2\n");
+        assert!(graph.diagnostics.is_empty());
+        assert_eq!(graph.path_steps(&graph.paths[0]).len(), 2);
+        let tag = &graph.record_tags(&graph.paths[0].tag_range)[0];
+        assert_eq!(graph.tag_value(tag), b"linear");
+        let tag = &graph.record_tags(&graph.walks[0].tag_range)[0];
+        assert_eq!(graph.tag_value(tag), b"i,1,2");
+    }
+
+    #[test]
+    fn statistics_do_not_overflow_for_large_declared_lengths() {
+        let graph = parse(format!("S\ta\t*\tLN:i:{}\nS\tb\t*\tLN:i:2\n", usize::MAX).as_bytes());
+        assert_eq!(graph.total_sequence_length(), usize::MAX);
+        assert_eq!(graph.n50(), usize::MAX);
+    }
+
+    fn compressed(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn loads_gzip_and_concatenated_members_without_requiring_an_extension() {
+        let mut input = tempfile::NamedTempFile::new().unwrap();
+        input
+            .write_all(&compressed(b"H\tVN:Z:1.0\nS\ta\tACGT\n"))
+            .unwrap();
+        input
+            .write_all(&compressed(b"S\tb\tTT\nL\ta\t+\tb\t-\t0M\n"))
+            .unwrap();
+        input.flush().unwrap();
+        let graph = parse_gfa(input.path()).unwrap();
+        // The mapped decompressed data must remain alive after all source handles close.
+        drop(input);
+        assert_eq!(graph.segments.len(), 2);
+        assert_eq!(graph.links.len(), 1);
+        assert_eq!(graph.segment_sequence(&graph.segments[0]), b"ACGT");
+        assert!(graph.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn rejects_corrupt_or_oversized_gzip_data() {
+        let cancel = AtomicBool::new(false);
+        let bytes = compressed(b"S\ta\tACGT\n");
+        let error = decompress_gzip(bytes.as_slice(), &cancel, 4).unwrap_err();
+        assert!(error.to_string().contains("safety limit"));
+        let error = decompress_gzip(&bytes[..bytes.len() - 3], &cancel, 1024).unwrap_err();
+        assert!(error.to_string().contains("decompress"));
+    }
+
+    #[test]
+    fn cancellation_stops_parsing_and_decompression() {
+        let cancelled = AtomicBool::new(true);
+        let error = parse_gfa_bytes_with_control(mmap_from(b"S\ta\tA\n"), &cancelled)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("cancelled"));
+
+        struct CancelOnRead<'a> {
+            bytes: &'a [u8],
+            cancel: &'a AtomicBool,
+        }
+        impl Read for CancelOnRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.bytes.read(buffer)?;
+                self.cancel.store(true, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let bytes = compressed(b"S\ta\tACGT\n");
+        let error = decompress_gzip(
+            CancelOnRead {
+                bytes: &bytes,
+                cancel: &cancel,
+            },
+            &cancel,
+            1024,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn warning_storage_is_bounded_and_non_gfa_input_is_rejected() {
+        let mut input = b"S\ta\tA\n".to_vec();
+        for _ in 0..(MAX_DIAGNOSTICS + 50) {
+            input.extend_from_slice(b"S\tbroken\n");
+        }
+        let graph = parse(&input);
+        assert_eq!(graph.diagnostics.len(), MAX_DIAGNOSTICS + 1);
+        assert!(
+            graph
+                .diagnostics
+                .last()
+                .unwrap()
+                .message
+                .contains("omitted")
+        );
+        assert!(
+            parse_gfa_bytes(mmap_from(b"not a GFA file\n"))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("No valid GFA segments")
+        );
     }
 }
