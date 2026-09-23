@@ -48,14 +48,6 @@ const SPRING_LINEAR_BEND: f32 = 0.30;
 /// Stiffness for graph-link springs — deliberately weak so repulsion can compete.
 const SPRING_LINK: f32 = 0.05;
 
-/// During an active grab, linked contigs should follow the dragged segment
-/// instead of remaining visually anchored to their previous positions.
-const DRAG_LINK_SPRING_SCALE: f32 = 3.0;
-
-/// Reduce near-field repulsion while dragging so attraction can pull connected
-/// segments along without the component immediately pushing itself apart.
-const DRAG_REPULSION_SCALE: f32 = 0.55;
-
 /// Extra damping during a grab. This scales each non-pinned displacement before
 /// the normal temperature clamp, reducing oscillation without making followers
 /// feel stuck.
@@ -1153,13 +1145,8 @@ impl Layout {
                     if dist2 > query_r * query_r {
                         return;
                     }
-                    let repulsion_scale = if attractor.is_some() {
-                        DRAG_REPULSION_SCALE
-                    } else {
-                        1.0
-                    };
-                    dpv[0] += repulsion_scale * k2 * dx / dist2;
-                    dpv[1] += repulsion_scale * k2 * dy / dist2;
+                    dpv[0] += k2 * dx / dist2;
+                    dpv[1] += k2 * dy / dist2;
                 });
             });
 
@@ -1177,10 +1164,7 @@ impl Layout {
                 continue;
             }
             let desired = self.springs_desired[i];
-            let mut stiff = self.springs_stiff[i];
-            if attractor.is_some() && stiff == SPRING_LINK {
-                stiff *= DRAG_LINK_SPRING_SCALE;
-            }
+            let stiff = self.springs_stiff[i];
             let dx = self.positions[pj][0] - self.positions[pi][0];
             let dy = self.positions[pj][1] - self.positions[pi][1];
             let dist = (dx * dx + dy * dy).sqrt().max(0.001);
