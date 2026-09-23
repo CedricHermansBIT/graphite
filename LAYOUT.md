@@ -51,8 +51,14 @@ practical.
 
 Isolated contigs and unambiguous circular components bypass the native solver.
 This avoids running FMMM on hundreds of thousands of already-settled components.
-Their actual polyline bounds are packed with the solved components, including
-space for the interiors of circles and the full lengths of isolated contigs.
+Their solved geometry is packed with the remaining components using a hybrid
+shape-aware packer. Graphite first creates a fast coarse rectangular arrangement
+and then compacts rasterized component silhouettes on a low-resolution occupancy
+grid. Linear and branched components use their actual PBD topology, including
+GFA links. Circular assemblies use a filled ellipse footprint: the interior of
+the ring remains protected, while unrelated components can occupy the otherwise
+wasted corners of its bounding square. Packing targets a modest landscape aspect
+ratio before the view is fitted to the window.
 The finished FMMM placement stays settled until the user drags something.
 Parsing and initialization run in a background loading thread.
 
