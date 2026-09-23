@@ -107,7 +107,7 @@ pub struct GfaApp {
     show_selection_panel: bool,
     /// Fit screen once on first frame after load.
     pending_fit: bool,
-    /// Grabbed physics node index for rope drag.
+    /// Grabbed physics node index for PBD graph manipulation.
     grabbed_phys: Option<usize>,
     grab_offset: [f32; 2],
     /// Current grab cursor world-space position.
@@ -935,7 +935,7 @@ impl GfaApp {
                 }
             });
 
-            // ── Grab / rope drag ─────────────────────────────────────────────
+            // ── Grab / PBD graph manipulation ─────────────────────────────────
             if self.interaction_mode == InteractionMode::Grab {
                 let vp_center = viewport.center();
                 let cursor_world = ctx.input(|i| i.pointer.hover_pos()).map(|cursor| {
