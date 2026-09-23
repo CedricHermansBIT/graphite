@@ -69,6 +69,13 @@ const DRAG_MOVE_LIMIT_SCALE: f32 = 0.25;
 /// the grabbed point instead of translating as a rigid polyline.
 const DRAG_FALLOFF_STRENGTH: f32 = 100.0;
 
+/// Position-based rope constraints for topology-proven linear components.
+/// Adjacent distances are inextensible; skip-one constraints preserve the
+/// contig's local bend so repeated dragging cannot slowly straighten a curved
+/// segment and make it look longer.
+const LINEAR_ROPE_ITERATIONS: usize = 12;
+const LINEAR_BEND_CONSTRAINT_STIFFNESS: f32 = 0.90;
+
 fn bandage_equivalent_spacing(graph: &ViewGraph) -> f32 {
     if graph.nodes.is_empty() {
         return BANDAGE_NODE_SEGMENT_LENGTH;
@@ -82,6 +89,45 @@ fn bandage_equivalent_spacing(graph: &ViewGraph) -> f32 {
         .max(BANDAGE_MIN_TOTAL_GRAPH_LENGTH as f64);
     let scale_to_bandage = target_total / total_visual.max(1.0);
     (BANDAGE_NODE_SEGMENT_LENGTH / scale_to_bandage as f32).max(0.5)
+}
+
+fn satisfy_distance_constraint(
+    positions: &mut [Pos2],
+    a: usize,
+    b: usize,
+    wanted: f32,
+    pinned: usize,
+    stiffness: f32,
+) {
+    let pa = positions[a];
+    let pb = positions[b];
+    let dx = pb[0] - pa[0];
+    let dy = pb[1] - pa[1];
+    let distance = dx.hypot(dy);
+    if distance <= 0.001 {
+        return;
+    }
+
+    let error = (distance - wanted) * stiffness;
+    let correction = [dx / distance * error, dy / distance * error];
+
+    match (a == pinned, b == pinned) {
+        (true, false) => {
+            positions[b][0] -= correction[0];
+            positions[b][1] -= correction[1];
+        }
+        (false, true) => {
+            positions[a][0] += correction[0];
+            positions[a][1] += correction[1];
+        }
+        (false, false) => {
+            positions[a][0] += correction[0] * 0.5;
+            positions[a][1] += correction[1] * 0.5;
+            positions[b][0] -= correction[0] * 0.5;
+            positions[b][1] -= correction[1] * 0.5;
+        }
+        (true, true) => {}
+    }
 }
 
 fn layout_hash(mut value: u64) -> u64 {
@@ -236,6 +282,9 @@ pub struct Layout {
     linear_path_pos: Vec<usize>,
     /// Rest length between linear_paths[ci][i] and [i + 1].
     linear_rest_lengths: Vec<Vec<f32>>,
+    /// Initial distance between physics point j and j+2 inside each contig.
+    /// These are bending constraints, not graph-link constraints.
+    linear_bend_rest: Vec<Vec<f32>>,
     physics_spacing: f32,
     active_points: Vec<usize>,
     grid: GridIndex,
@@ -398,6 +447,7 @@ impl Layout {
                 linear_paths: Vec::new(),
                 linear_path_pos: Vec::new(),
                 linear_rest_lengths: Vec::new(),
+                linear_bend_rest: Vec::new(),
                 physics_spacing: BANDAGE_NODE_SEGMENT_LENGTH,
                 active_points: Vec::new(),
                 grid: GridIndex::default(),
@@ -690,6 +740,22 @@ impl Layout {
             })
             .collect();
 
+        let mut linear_bend_rest = vec![Vec::new(); n];
+        for node in 0..n {
+            if !linear[comp_ids[node]] {
+                continue;
+            }
+            let start = node_pts_start[node];
+            let count = node_pts_count[node];
+            linear_bend_rest[node] = (0..count.saturating_sub(2))
+                .map(|j| {
+                    let a = positions[start + j];
+                    let b = positions[start + j + 2];
+                    (b[0] - a[0]).hypot(b[1] - a[1]).max(0.001)
+                })
+                .collect();
+        }
+
         let active_points: Vec<_> = (0..total_pts)
             .filter(|&pi| !fixed[comp_ids[phys_to_node[pi] as usize]])
             .collect();
@@ -783,6 +849,7 @@ impl Layout {
             linear_paths,
             linear_path_pos,
             linear_rest_lengths,
+            linear_bend_rest,
             physics_spacing,
             active_points,
             grid: GridIndex::default(),
@@ -1143,10 +1210,12 @@ impl Layout {
         }
     }
 
-    /// Drag a topology-proven linear component as an inextensible rope.
-    /// The grabbed physics point follows the cursor exactly. Distance
-    /// constraints are then propagated independently towards both tips, so the
-    /// path can bend freely without stretching its segments or GFA links.
+    /// Drag a topology-proven linear component as a position-constrained rope.
+    /// Adjacent physics points keep their original distance, while per-contig
+    /// skip-one constraints retain local curvature. The latter is important:
+    /// distance-only ropes slowly straighten under repeated dragging, so a
+    /// curved contig can look substantially longer even though its arc length
+    /// technically did not change.
     fn drag_linear_rope_to(&mut self, pos: Pos2, pi: usize) -> bool {
         if pi >= self.positions.len() {
             return false;
@@ -1163,49 +1232,79 @@ impl Layout {
 
         self.user_positioned = true;
         self.drag_component = Some(ci);
+
+        let path = self.linear_paths[ci].clone();
+        let rest = self.linear_rest_lengths[ci].clone();
+        let component_nodes = self.components[ci].clone();
+
+        // Start from the same immediate response as before: the grabbed point
+        // follows the cursor exactly, and the two halves are pulled towards it.
         self.positions[pi] = pos;
-
-        let path = &self.linear_paths[ci];
-        let rest = &self.linear_rest_lengths[ci];
-
-        // Pull from the grabbed point towards the right tip.
         for index in path_index + 1..path.len() {
-            let anchor = self.positions[path[index - 1]];
-            let current = self.positions[path[index]];
-            let wanted = rest[index - 1];
-            let dx = current[0] - anchor[0];
-            let dy = current[1] - anchor[1];
-            let distance = dx.hypot(dy);
-            let direction = if distance > 0.001 {
-                [dx / distance, dy / distance]
-            } else {
-                [1.0, 0.0]
-            };
-            self.positions[path[index]] = [
-                anchor[0] + direction[0] * wanted,
-                anchor[1] + direction[1] * wanted,
-            ];
+            satisfy_distance_constraint(
+                &mut self.positions,
+                path[index - 1],
+                path[index],
+                rest[index - 1],
+                pi,
+                1.0,
+            );
         }
-
-        // Pull from the grabbed point towards the left tip.
         for index in (0..path_index).rev() {
-            let anchor = self.positions[path[index + 1]];
-            let current = self.positions[path[index]];
-            let wanted = rest[index];
-            let dx = current[0] - anchor[0];
-            let dy = current[1] - anchor[1];
-            let distance = dx.hypot(dy);
-            let direction = if distance > 0.001 {
-                [dx / distance, dy / distance]
-            } else {
-                [-1.0, 0.0]
-            };
-            self.positions[path[index]] = [
-                anchor[0] + direction[0] * wanted,
-                anchor[1] + direction[1] * wanted,
-            ];
+            satisfy_distance_constraint(
+                &mut self.positions,
+                path[index],
+                path[index + 1],
+                rest[index],
+                pi,
+                1.0,
+            );
         }
 
+        // PBD-style iterations keep both the rope length and each contig's
+        // local bend stable. Graph links remain free hinges because bending
+        // constraints are deliberately only added within GFA segments.
+        for _ in 0..LINEAR_ROPE_ITERATIONS {
+            self.positions[pi] = pos;
+
+            for index in 0..rest.len() {
+                satisfy_distance_constraint(
+                    &mut self.positions,
+                    path[index],
+                    path[index + 1],
+                    rest[index],
+                    pi,
+                    1.0,
+                );
+            }
+            for index in (0..rest.len()).rev() {
+                satisfy_distance_constraint(
+                    &mut self.positions,
+                    path[index],
+                    path[index + 1],
+                    rest[index],
+                    pi,
+                    1.0,
+                );
+            }
+
+            for &contig in &component_nodes {
+                let start = self.node_pts_start[contig];
+                for (j, &wanted) in self.linear_bend_rest[contig].iter().enumerate() {
+                    satisfy_distance_constraint(
+                        &mut self.positions,
+                        start + j,
+                        start + j + 2,
+                        wanted,
+                        pi,
+                        LINEAR_BEND_CONSTRAINT_STIFFNESS,
+                    );
+                }
+            }
+        }
+
+        // Re-pin after the final constraint pass.
+        self.positions[pi] = pos;
         true
     }
 
@@ -1837,9 +1936,36 @@ mod tests {
             let b = layout.positions[pair[1]];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             assert!(
-                (length - rest[index]).abs() < 0.01,
+                (length - rest[index]).abs() < 0.10,
                 "rope link {index} stretched from {} to {length}",
                 rest[index]
+            );
+        }
+
+        let original_spans: Vec<f32> = (0..3)
+            .map(|node| {
+                let a = layout.start(node);
+                let b = layout.end(node);
+                (b[0] - a[0]).hypot(b[1] - a[1])
+            })
+            .collect();
+
+        for step in 0..80 {
+            let t = step as f32 / 79.0;
+            let target = [
+                layout.positions[grabbed][0] + 8.0,
+                layout.positions[grabbed][1] + (t * std::f32::consts::TAU).sin() * 5.0,
+            ];
+            assert!(layout.drag_linear_rope_to(target, grabbed));
+        }
+
+        for (node, &original) in original_spans.iter().enumerate() {
+            let a = layout.start(node);
+            let b = layout.end(node);
+            let span = (b[0] - a[0]).hypot(b[1] - a[1]);
+            assert!(
+                span <= original * 1.03 + 0.01,
+                "contig {node} visually lengthened from {original} to {span}"
             );
         }
     }
