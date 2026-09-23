@@ -592,7 +592,7 @@ impl Layout {
                     for j in 0..count {
                         let index = if reverse[v] { count - 1 - j } else { j };
                         positions[node_pts_start[v] + index] = [
-                            x[d] + column as f32 * (widths[d] + k)
+                            x[d] + column as f32 * (widths[d] + physics_spacing)
                                 + graph.nodes[v].visual_len * j as f32 / (count - 1) as f32,
                             y,
                         ];
