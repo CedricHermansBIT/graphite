@@ -176,22 +176,31 @@ fn preserve_ring_area(
 
 #[derive(Clone, Debug)]
 struct PackFootprint {
-    cells: Vec<(i32, i32)>,
     width: i32,
     height: i32,
-    /// Lowest and highest occupied cell in each footprint column. These let
-    /// the packer test an entire vertical placement in O(width) instead of
-    /// repeatedly collision-testing every raster cell while walking upward.
+    /// Lowest and highest occupied cell in each footprint column. Packing only
+    /// needs these two profiles; retaining every raster cell was a large source
+    /// of allocation/hash overhead on assemblies with many components.
     bottom: Vec<i32>,
     top: Vec<i32>,
     /// Normalized-cell location corresponding to the component's bounding-box
-    /// minimum. Dilation can make this non-zero.
+    /// minimum. Padding can make this non-zero.
     anchor_x: i32,
     anchor_y: i32,
 }
 
-fn rasterize_pack_segment(
-    cells: &mut HashSet<(i32, i32)>,
+fn update_pack_profile(bottom: &mut [i32], top: &mut [i32], x: i32, y: i32) {
+    if x < 0 || x as usize >= bottom.len() {
+        return;
+    }
+    let x = x as usize;
+    bottom[x] = bottom[x].min(y);
+    top[x] = top[x].max(y);
+}
+
+fn rasterize_pack_segment_profile(
+    bottom: &mut [i32],
+    top: &mut [i32],
     a: Pos2,
     b: Pos2,
     lo: Pos2,
@@ -206,62 +215,68 @@ fn rasterize_pack_segment(
         .max(1.0) as usize;
     for step in 0..=steps {
         let t = step as f32 / steps as f32;
-        let x = (ax + (bx - ax) * t).floor() as i32;
-        let y = (ay + (by - ay) * t).floor() as i32;
-        cells.insert((x, y));
+        update_pack_profile(
+            bottom,
+            top,
+            (ax + (bx - ax) * t).floor() as i32,
+            (ay + (by - ay) * t).floor() as i32,
+        );
     }
 }
 
-fn normalize_pack_cells(mut raw: HashSet<(i32, i32)>) -> PackFootprint {
-    if raw.is_empty() {
-        raw.insert((0, 0));
+fn finish_pack_profile(mut bottom: Vec<i32>, mut top: Vec<i32>) -> PackFootprint {
+    if !bottom.iter().zip(&top).any(|(&lo, &hi)| lo <= hi) {
+        bottom[0] = 0;
+        top[0] = 0;
     }
 
-    let source: Vec<_> = raw.iter().copied().collect();
-    for (x, y) in source {
-        for dx in -PACK_PADDING_CELLS..=PACK_PADDING_CELLS {
-            for dy in -PACK_PADDING_CELLS..=PACK_PADDING_CELLS {
-                raw.insert((x + dx, y + dy));
-            }
+    let padding = PACK_PADDING_CELLS.max(0);
+    let raw_width = bottom.len();
+    let width = raw_width as i32 + 2 * padding;
+    let mut padded_bottom = vec![i32::MAX; width as usize];
+    let mut padded_top = vec![i32::MIN; width as usize];
+
+    for source_x in 0..raw_width {
+        if bottom[source_x] > top[source_x] {
+            continue;
+        }
+        for dx in -padding..=padding {
+            let target_x = source_x as i32 + padding + dx;
+            let target = target_x as usize;
+            padded_bottom[target] = padded_bottom[target].min(bottom[source_x] - padding);
+            padded_top[target] = padded_top[target].max(top[source_x] + padding);
         }
     }
 
-    let min_x = raw.iter().map(|&(x, _)| x).min().unwrap_or(0);
-    let min_y = raw.iter().map(|&(_, y)| y).min().unwrap_or(0);
-    let max_x = raw.iter().map(|&(x, _)| x).max().unwrap_or(0);
-    let max_y = raw.iter().map(|&(_, y)| y).max().unwrap_or(0);
+    let min_y = padded_bottom
+        .iter()
+        .zip(&padded_top)
+        .filter_map(|(&lo, &hi)| (lo <= hi).then_some(lo))
+        .min()
+        .unwrap_or(0);
+    let max_y = padded_bottom
+        .iter()
+        .zip(&padded_top)
+        .filter_map(|(&lo, &hi)| (lo <= hi).then_some(hi))
+        .max()
+        .unwrap_or(0);
 
-    let mut cells: Vec<_> = raw
-        .into_iter()
-        .map(|(x, y)| (x - min_x, y - min_y))
-        .collect();
-    cells.sort_unstable();
-
-    let width = max_x - min_x + 1;
-    let height = max_y - min_y + 1;
-    let mut bottom = vec![i32::MAX; width as usize];
-    let mut top = vec![i32::MIN; width as usize];
-    for &(x, y) in &cells {
-        let column = x as usize;
-        bottom[column] = bottom[column].min(y);
-        top[column] = top[column].max(y);
-    }
-    // Dilation normally makes every column non-empty, but keep the profile
-    // total so degenerate rasterizations cannot poison skyline arithmetic.
-    for x in 0..width as usize {
-        if bottom[x] == i32::MAX {
-            bottom[x] = 0;
-            top[x] = -1;
+    for x in 0..padded_bottom.len() {
+        if padded_bottom[x] <= padded_top[x] {
+            padded_bottom[x] -= min_y;
+            padded_top[x] -= min_y;
+        } else {
+            padded_bottom[x] = 0;
+            padded_top[x] = -1;
         }
     }
 
     PackFootprint {
-        cells,
         width,
-        height,
-        bottom,
-        top,
-        anchor_x: -min_x,
+        height: max_y - min_y + 1,
+        bottom: padded_bottom,
+        top: padded_top,
+        anchor_x: padding,
         anchor_y: -min_y,
     }
 }
@@ -1380,33 +1395,39 @@ impl Layout {
         let mut footprints = Vec::with_capacity(self.components.len());
         for ci in 0..self.components.len() {
             let (lo, hi) = bounds[ci];
-            let mut raw = HashSet::new();
+            let raw_width = (((hi[0] - lo[0]) / cell_size).ceil() as usize + 1).max(1);
+            let mut bottom = vec![i32::MAX; raw_width];
+            let mut top = vec![i32::MIN; raw_width];
 
             if self.circular[ci] {
-                // Treat the ring as a filled ellipse for packing. The empty
-                // centre is intentionally protected because putting unrelated
-                // components inside a circular assembly is visually misleading.
-                let width = ((hi[0] - lo[0]) / cell_size).ceil().max(1.0) as i32;
-                let height = ((hi[1] - lo[1]) / cell_size).ceil().max(1.0) as i32;
-                let rx = width.max(1) as f32 * 0.5;
-                let ry = height.max(1) as f32 * 0.5;
-                for x in 0..=width {
-                    for y in 0..=height {
-                        let nx = (x as f32 + 0.5 - rx) / rx.max(0.5);
-                        let ny = (y as f32 + 0.5 - ry) / ry.max(0.5);
-                        if nx * nx + ny * ny <= 1.0 {
-                            raw.insert((x, y));
-                        }
+                // Build the filled ellipse directly as a pair of column
+                // profiles. This is O(diameter), instead of inserting every
+                // interior cell into a HashSet (O(area)).
+                let width_cells = (raw_width - 1).max(1) as f32;
+                let height_cells = ((hi[1] - lo[1]) / cell_size).ceil().max(1.0);
+                let cx = width_cells * 0.5;
+                let cy = height_cells * 0.5;
+                let rx = cx.max(0.5);
+                let ry = cy.max(0.5);
+
+                for x in 0..raw_width {
+                    let nx = (x as f32 - cx) / rx;
+                    if nx.abs() > 1.0 {
+                        continue;
                     }
+                    let extent = ry * (1.0 - nx * nx).max(0.0).sqrt();
+                    bottom[x] = (cy - extent).floor() as i32;
+                    top[x] = (cy + extent).ceil() as i32;
                 }
             } else {
-                // The PBD distance graph already contains all within-contig
-                // pieces and GFA links, so rasterizing it captures the visible
-                // topology more accurately than a component rectangle.
+                // Rasterize straight into the per-column profiles. No per-cell
+                // HashSet is needed because the skyline packer only consumes
+                // the lower and upper envelope of each footprint.
                 for &constraint_index in &self.pbd_component_distances[ci] {
                     let constraint = self.pbd_distances[constraint_index];
-                    rasterize_pack_segment(
-                        &mut raw,
+                    rasterize_pack_segment_profile(
+                        &mut bottom,
+                        &mut top,
                         self.positions[constraint.a],
                         self.positions[constraint.b],
                         lo,
@@ -1415,19 +1436,21 @@ impl Layout {
                 }
 
                 // Defensive fallback for degenerate components.
-                if raw.is_empty() {
+                if !bottom.iter().zip(&top).any(|(&a, &b)| a <= b) {
                     for &node in &self.components[ci] {
                         for &p in self.pts(node) {
-                            raw.insert((
+                            update_pack_profile(
+                                &mut bottom,
+                                &mut top,
                                 ((p[0] - lo[0]) / cell_size).floor() as i32,
                                 ((p[1] - lo[1]) / cell_size).floor() as i32,
-                            ));
+                            );
                         }
                     }
                 }
             }
 
-            footprints.push(normalize_pack_cells(raw));
+            footprints.push(finish_pack_profile(bottom, top));
         }
 
         // Fast shape-aware skyline packing. The previous implementation first
