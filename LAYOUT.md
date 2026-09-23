@@ -61,15 +61,15 @@ laid out as circles. This includes single-contig self-loops, two-contig rings,
 reverse-oriented segments, and reciprocal duplicate links. Ambiguous and
 branching cyclic components are handled by FMMM rather than forced into one ring.
 
-In Grab (`G`) mode, click a contig's visible polyline and drag. The cursor keeps
-its original offset and moves the whole contig without stretching it. A circular
-component moves as a unit. While the pointer is held, graph-link springs and
-near-field repulsion keep the same strengths used by ordinary layout relaxation.
-Dragging only changes the movement limit and damping so the grabbed region can
-keep following the cursor without changing the component's force balance.
-Rust-side relaxation settles the local geometry after release. Automatic packing
-stops after manual placement to preserve edits; manually placed components may
-therefore overlap.
+In Grab (`G`) mode, Graphite edits the displayed geometry directly instead of
+rerunning the force solver while the pointer is held. This matches Bandage's
+interactive model and avoids large spring/repulsion impulses at branch points.
+Linear components use a length-constrained rope drag; other contigs use the
+Bandage-style nearby-pieces falloff, and circular components move as a unit.
+Connected edges redraw from the edited endpoints. Releasing the pointer preserves
+the manual placement rather than immediately rerunning FMMM/Rust relaxation.
+Automatic packing also stops after manual placement, so manually placed components
+may overlap.
 
 Interactive repulsion uses reusable hashed spatial buckets, an actual distance
 cutoff, and queries confined to the same connected component. Settled contigs
