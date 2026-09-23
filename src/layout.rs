@@ -865,9 +865,23 @@ impl Layout {
             if self.springs_stiff[i] != SPRING_LINK {
                 continue;
             }
-            let a = indices[self.springs_a[i] as usize];
-            let b = indices[self.springs_b[i] as usize];
+            let a_pi = self.springs_a[i] as usize;
+            let b_pi = self.springs_b[i] as usize;
+            let a = indices[a_pi];
+            let b = indices[b_pi];
             if a == u32::MAX || b == u32::MAX {
+                // Linear and fixed components are deliberately omitted from
+                // the generic solver. Their graph-link endpoints therefore
+                // have no sampled index here.
+                let a_component = self.comp_ids[self.phys_to_node[a_pi] as usize];
+                let b_component = self.comp_ids[self.phys_to_node[b_pi] as usize];
+                if self.linear[a_component]
+                    || self.fixed[a_component]
+                    || self.linear[b_component]
+                    || self.fixed[b_component]
+                {
+                    continue;
+                }
                 log::warn!("Rust layout skipped an unresolved sampled spring endpoint");
                 continue;
             }
