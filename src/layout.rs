@@ -364,17 +364,6 @@ pub struct Layout {
     circular: Vec<bool>,
     linear: Vec<bool>,
     fixed: Vec<bool>,
-    /// Ordered physics-node chain for topology-proven linear components.
-    /// Consecutive entries span both within-contig pieces and GFA links.
-    linear_paths: Vec<Vec<usize>>,
-    /// Reverse lookup: physics node -> index in its linear component path.
-    linear_path_pos: Vec<usize>,
-    /// Rest length between linear_paths[ci][i] and [i + 1].
-    linear_rest_lengths: Vec<Vec<f32>>,
-    /// Initial distance between physics point j and j+2 inside each contig.
-    /// These are bending constraints, not graph-link constraints.
-    linear_bend_rest: Vec<Vec<f32>>,
-
     /// Generic PBD interaction graph used for linear, branched, circular and
     /// isolated components. Distance constraints include both within-contig
     /// links and GFA links; bend constraints exist only inside contigs.
@@ -548,10 +537,6 @@ impl Layout {
                 circular: Vec::new(),
                 linear: Vec::new(),
                 fixed: Vec::new(),
-                linear_paths: Vec::new(),
-                linear_path_pos: Vec::new(),
-                linear_rest_lengths: Vec::new(),
-                linear_bend_rest: Vec::new(),
                 pbd_distances: Vec::new(),
                 pbd_bends: Vec::new(),
                 pbd_component_distances: Vec::new(),
@@ -805,71 +790,6 @@ impl Layout {
             }
         }
 
-        let mut linear_paths = vec![Vec::new(); components.len()];
-        let mut linear_path_pos = vec![usize::MAX; total_pts];
-        for (ci, comp) in components.iter().enumerate() {
-            if !linear[ci] {
-                continue;
-            }
-            let Some(mut entry) = comp
-                .iter()
-                .flat_map(|&node| [2 * node, 2 * node + 1])
-                .filter(|&endpoint| ends[endpoint].is_empty())
-                .min()
-            else {
-                continue;
-            };
-            let path = &mut linear_paths[ci];
-            let mut visited = 0usize;
-            while visited < comp.len() {
-                let node = entry / 2;
-                let start = node_pts_start[node];
-                let count = node_pts_count[node];
-                if entry % 2 == 0 {
-                    path.extend(start..start + count);
-                } else {
-                    path.extend((start..start + count).rev());
-                }
-                visited += 1;
-                let exit = entry ^ 1;
-                if ends[exit].is_empty() {
-                    break;
-                }
-                entry = ends[exit][0];
-            }
-            for (index, &pi) in path.iter().enumerate() {
-                linear_path_pos[pi] = index;
-            }
-        }
-        let linear_rest_lengths: Vec<Vec<f32>> = linear_paths
-            .iter()
-            .map(|path| {
-                path.windows(2)
-                    .map(|pair| {
-                        let a = positions[pair[0]];
-                        let b = positions[pair[1]];
-                        (b[0] - a[0]).hypot(b[1] - a[1]).max(0.001)
-                    })
-                    .collect()
-            })
-            .collect();
-
-        let mut linear_bend_rest = vec![Vec::new(); n];
-        for node in 0..n {
-            if !linear[comp_ids[node]] {
-                continue;
-            }
-            let start = node_pts_start[node];
-            let count = node_pts_count[node];
-            linear_bend_rest[node] = (0..count.saturating_sub(2))
-                .map(|j| {
-                    let a = positions[start + j];
-                    let b = positions[start + j + 2];
-                    (b[0] - a[0]).hypot(b[1] - a[1]).max(0.001)
-                })
-                .collect();
-        }
-
         // ── Generic PBD interaction topology ────────────────────────────────
         // This graph is independent of the FMMM/Rust layout solver. It is used
         // only while the user manipulates a component.
@@ -1055,10 +975,6 @@ impl Layout {
             circular,
             linear,
             fixed,
-            linear_paths,
-            linear_path_pos,
-            linear_rest_lengths,
-            linear_bend_rest,
             pbd_distances,
             pbd_bends,
             pbd_component_distances,
@@ -1588,104 +1504,6 @@ impl Layout {
                 p[1] += delta[1] * drag_strength;
             }
         }
-    }
-
-    /// Drag a topology-proven linear component as a position-constrained rope.
-    /// Adjacent physics points keep their original distance, while per-contig
-    /// skip-one constraints retain local curvature. The latter is important:
-    /// distance-only ropes slowly straighten under repeated dragging, so a
-    /// curved contig can look substantially longer even though its arc length
-    /// technically did not change.
-    fn drag_linear_rope_to(&mut self, pos: Pos2, pi: usize) -> bool {
-        if pi >= self.positions.len() {
-            return false;
-        }
-        let node = self.phys_to_node[pi] as usize;
-        let ci = self.comp_ids[node];
-        if !self.linear[ci] {
-            return false;
-        }
-        let path_index = self.linear_path_pos[pi];
-        if path_index == usize::MAX || self.linear_paths[ci].is_empty() {
-            return false;
-        }
-
-        self.user_positioned = true;
-        self.drag_component = Some(ci);
-
-        let path = self.linear_paths[ci].clone();
-        let rest = self.linear_rest_lengths[ci].clone();
-        let component_nodes = self.components[ci].clone();
-
-        // Start from the same immediate response as before: the grabbed point
-        // follows the cursor exactly, and the two halves are pulled towards it.
-        self.positions[pi] = pos;
-        for index in path_index + 1..path.len() {
-            satisfy_distance_constraint(
-                &mut self.positions,
-                path[index - 1],
-                path[index],
-                rest[index - 1],
-                pi,
-                1.0,
-            );
-        }
-        for index in (0..path_index).rev() {
-            satisfy_distance_constraint(
-                &mut self.positions,
-                path[index],
-                path[index + 1],
-                rest[index],
-                pi,
-                1.0,
-            );
-        }
-
-        // PBD-style iterations keep both the rope length and each contig's
-        // local bend stable. Graph links remain free hinges because bending
-        // constraints are deliberately only added within GFA segments.
-        for _ in 0..LINEAR_ROPE_ITERATIONS {
-            self.positions[pi] = pos;
-
-            for index in 0..rest.len() {
-                satisfy_distance_constraint(
-                    &mut self.positions,
-                    path[index],
-                    path[index + 1],
-                    rest[index],
-                    pi,
-                    1.0,
-                );
-            }
-            for index in (0..rest.len()).rev() {
-                satisfy_distance_constraint(
-                    &mut self.positions,
-                    path[index],
-                    path[index + 1],
-                    rest[index],
-                    pi,
-                    1.0,
-                );
-            }
-
-            for &contig in &component_nodes {
-                let start = self.node_pts_start[contig];
-                for (j, &wanted) in self.linear_bend_rest[contig].iter().enumerate() {
-                    satisfy_distance_constraint(
-                        &mut self.positions,
-                        start + j,
-                        start + j + 2,
-                        wanted,
-                        pi,
-                        LINEAR_BEND_CONSTRAINT_STIFFNESS,
-                    );
-                }
-            }
-        }
-
-        // Re-pin after the final constraint pass.
-        self.positions[pi] = pos;
-        true
     }
 
     // ── Force-directed step ───────────────────────────────────────────────────
@@ -2281,66 +2099,49 @@ mod tests {
     }
 
     #[test]
-    fn dragging_linear_component_behaves_like_nonstretching_rope() {
+    fn pbd_linear_drag_respects_lra_and_local_lengths() {
         use Strand::Forward as F;
         let graph = graph(&[1200.0, 1200.0, 1200.0], &[(0, F, 1, F), (1, F, 2, F)]);
         let mut layout = Layout::new_with_graph(&graph);
         let ci = layout.comp_ids[1];
         assert!(layout.linear[ci]);
 
-        let path = layout.linear_paths[ci].clone();
-        let rest = layout.linear_rest_lengths[ci].clone();
-        let grabbed_index = path.len() / 2;
-        let grabbed = path[grabbed_index];
+        let grabbed = layout.node_pts_start[1] + layout.node_pts_count[1] / 2;
         let target = [
-            layout.positions[grabbed][0] + 400.0,
-            layout.positions[grabbed][1] + 150.0,
+            layout.positions[grabbed][0] + 600.0,
+            layout.positions[grabbed][1] + 220.0,
         ];
-
-        assert!(layout.drag_linear_rope_to(target, grabbed));
+        assert!(layout.drag_pbd_to(target, grabbed));
         assert_eq!(layout.positions[grabbed], target);
 
-        for (index, pair) in path.windows(2).enumerate() {
-            let a = layout.positions[pair[0]];
-            let b = layout.positions[pair[1]];
-            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        for &pi in &layout.pbd_particles[ci] {
+            let limit = layout.drag_lra[pi];
+            if !limit.is_finite() {
+                continue;
+            }
+            let dx = layout.positions[pi][0] - target[0];
+            let dy = layout.positions[pi][1] - target[1];
             assert!(
-                (length - rest[index]).abs() < 0.10,
-                "rope link {index} stretched from {} to {length}",
-                rest[index]
+                dx.hypot(dy) <= limit * 1.001 + 0.01,
+                "LRA limit exceeded for particle {pi}"
             );
         }
 
-        let original_spans: Vec<f32> = (0..3)
-            .map(|node| {
-                let a = layout.start(node);
-                let b = layout.end(node);
-                (b[0] - a[0]).hypot(b[1] - a[1])
-            })
-            .collect();
-
-        for step in 0..80 {
-            let t = step as f32 / 79.0;
-            let target = [
-                layout.positions[grabbed][0] + 8.0,
-                layout.positions[grabbed][1] + (t * std::f32::consts::TAU).sin() * 5.0,
-            ];
-            assert!(layout.drag_linear_rope_to(target, grabbed));
-        }
-
-        for (node, &original) in original_spans.iter().enumerate() {
-            let a = layout.start(node);
-            let b = layout.end(node);
-            let span = (b[0] - a[0]).hypot(b[1] - a[1]);
+        for &index in &layout.pbd_component_distances[ci] {
+            let c = layout.pbd_distances[index];
+            let a = layout.positions[c.a];
+            let b = layout.positions[c.b];
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             assert!(
-                span <= original * 1.03 + 0.01,
-                "contig {node} visually lengthened from {original} to {span}"
+                (length - c.rest).abs() <= c.rest * 0.03 + 0.02,
+                "distance constraint stretched from {} to {length}",
+                c.rest
             );
         }
     }
 
     #[test]
-    fn dragging_branched_component_does_not_run_force_solver() {
+    fn pbd_branched_drag_moves_followers_without_exploding() {
         use Strand::Forward as F;
         let graph = graph(
             &[1200.0, 1200.0, 1200.0, 1200.0],
@@ -2350,26 +2151,75 @@ mod tests {
         let ci = layout.comp_ids[0];
         assert!(!layout.linear[ci]);
 
-        let before_1 = layout.pts(1).to_vec();
-        let before_2 = layout.pts(2).to_vec();
-        let before_3 = layout.pts(3).to_vec();
-
+        let follower_before = layout.center(3);
         let grabbed = layout.node_pts_start[0] + layout.node_pts_count[0] / 2;
         let target = [
             layout.positions[grabbed][0] + 500.0,
             layout.positions[grabbed][1] + 200.0,
         ];
-        layout.step(&graph, &LayoutParams::default(), Some((target, grabbed)));
-
+        assert!(layout.drag_pbd_to(target, grabbed));
         assert_eq!(layout.positions[grabbed], target);
-        assert_eq!(layout.pts(1), before_1.as_slice());
-        assert_eq!(layout.pts(2), before_2.as_slice());
-        assert_eq!(layout.pts(3), before_3.as_slice());
+        assert!(layout.positions.iter().flatten().all(|value| value.is_finite()));
 
-        let before_release = layout.positions.clone();
-        layout.step(&graph, &LayoutParams::default(), None);
-        assert_eq!(layout.positions, before_release);
-        assert!(layout.converged);
+        let follower_after = layout.center(3);
+        assert!(
+            (follower_after[0] - follower_before[0])
+                .hypot(follower_after[1] - follower_before[1])
+                > 0.1,
+            "a connected branch should follow the grab"
+        );
+
+        for &index in &layout.pbd_component_distances[ci] {
+            let c = layout.pbd_distances[index];
+            let a = layout.positions[c.a];
+            let b = layout.positions[c.b];
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            assert!(
+                (length - c.rest).abs() <= c.rest * 0.05 + 0.05,
+                "branched distance constraint stretched from {} to {length}",
+                c.rest
+            );
+        }
+    }
+
+    #[test]
+    fn pbd_circular_drag_preserves_lengths_and_open_area() {
+        use Strand::Forward as F;
+        let graph = graph(
+            &[900.0, 900.0, 900.0],
+            &[(0, F, 1, F), (1, F, 2, F), (2, F, 0, F)],
+        );
+        let mut layout = Layout::new_with_graph(&graph);
+        let ci = layout.comp_ids[0];
+        assert!(layout.circular[ci]);
+        let initial_area = layout.pbd_ring_area[ci].abs();
+        assert!(initial_area > 0.01);
+
+        let grabbed = layout.node_pts_start[0] + layout.node_pts_count[0] / 2;
+        let target = [
+            layout.positions[grabbed][0] + 250.0,
+            layout.positions[grabbed][1] - 180.0,
+        ];
+        assert!(layout.drag_pbd_to(target, grabbed));
+        assert_eq!(layout.positions[grabbed], target);
+
+        for &index in &layout.pbd_component_distances[ci] {
+            let c = layout.pbd_distances[index];
+            let a = layout.positions[c.a];
+            let b = layout.positions[c.b];
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            assert!(
+                (length - c.rest).abs() <= c.rest * 0.05 + 0.05,
+                "circular distance constraint stretched from {} to {length}",
+                c.rest
+            );
+        }
+
+        let area = polygon_signed_area(&layout.positions, &layout.pbd_ring_paths[ci]).abs();
+        assert!(
+            area > initial_area * 0.35,
+            "ring collapsed too far: area {area}, initial {initial_area}"
+        );
     }
 
     #[test]
