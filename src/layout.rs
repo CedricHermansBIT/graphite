@@ -21,17 +21,17 @@ unsafe extern "C" {
 
 // ── Physics constants ─────────────────────────────────────────────────────────
 
-/// Ideal spacing between physics nodes of the same segment AND between
-/// unconnected nodes at equilibrium.  k = AREA_PER_NODE.sqrt().
-const AREA_PER_NODE: f32 = 30_000.0;
+/// Bandage normalises the drawn graph to a mean node length of roughly 40,
+/// samples long nodes every 20 units and uses 5-unit graph links. Graphite
+/// keeps its own visible length scale, so convert those ratios back into
+/// display units for the current graph.
+const BANDAGE_MEAN_NODE_LENGTH: f32 = 40.0;
+const BANDAGE_MIN_TOTAL_GRAPH_LENGTH: f32 = 500.0;
+const BANDAGE_NODE_SEGMENT_LENGTH: f32 = 20.0;
+const GRAPH_EDGE_RATIO: f32 = 5.0 / BANDAGE_NODE_SEGMENT_LENGTH;
 
 /// Maximum physics nodes per GFA segment (caps very long contigs).
 const MAX_PTS: usize = 64;
-
-/// Desired length for graph-link springs expressed as a fraction of k.
-/// Must be large enough that repulsion can overcome link attraction.
-/// At 0.4*k, equilibrium sits comfortably between repulsion and spring.
-const GRAPH_EDGE_RATIO: f32 = 0.4;
 
 /// Stiffness for internal (within-segment) adjacent springs.
 const SPRING_INTERNAL: f32 = 0.55;
@@ -39,6 +39,11 @@ const SPRING_INTERNAL: f32 = 0.55;
 /// Stiffness for bending springs (skip-one: i↔i+2). Resists chain folding.
 /// Rest length = 2 × segment_spacing keeps the chain straight.
 const SPRING_BEND: f32 = 0.45;
+
+/// Across a known linear GFA junction, connect the two interior points as a
+/// long skip spring. This preserves a gentle path through segment boundaries
+/// after interactive dragging without making the component rigid.
+const SPRING_LINEAR_BEND: f32 = 0.30;
 
 /// Stiffness for graph-link springs — deliberately weak so repulsion can compete.
 const SPRING_LINK: f32 = 0.05;
@@ -70,6 +75,109 @@ const DRAG_MOVE_LIMIT_SCALE: f32 = 0.85;
 /// strength of 100. Use the same curve for the dragged contig so it bends around
 /// the grabbed point instead of translating as a rigid polyline.
 const DRAG_FALLOFF_STRENGTH: f32 = 100.0;
+
+fn bandage_equivalent_spacing(graph: &ViewGraph) -> f32 {
+    if graph.nodes.is_empty() {
+        return BANDAGE_NODE_SEGMENT_LENGTH;
+    }
+    let total_visual = graph
+        .nodes
+        .iter()
+        .map(|node| node.visual_len.max(1.0) as f64)
+        .sum::<f64>();
+    let target_total = ((graph.nodes.len() as f64) * BANDAGE_MEAN_NODE_LENGTH as f64)
+        .max(BANDAGE_MIN_TOTAL_GRAPH_LENGTH as f64);
+    let scale_to_bandage = target_total / total_visual.max(1.0);
+    (BANDAGE_NODE_SEGMENT_LENGTH / scale_to_bandage as f32).max(0.5)
+}
+
+fn layout_hash(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn unit_hash(value: u64) -> f32 {
+    ((layout_hash(value) >> 40) as u32) as f32 / 16_777_215.0
+}
+
+fn seed_linear_component(
+    comp: &[usize],
+    component_index: usize,
+    graph: &ViewGraph,
+    ends: &[Vec<usize>],
+    node_pts_start: &[usize],
+    node_pts_count: &[usize],
+    positions: &mut [Pos2],
+    physics_spacing: f32,
+    graph_edge_desired: f32,
+) {
+    let Some(mut entry) = comp
+        .iter()
+        .flat_map(|&node| [2 * node, 2 * node + 1])
+        .filter(|&endpoint| ends[endpoint].is_empty())
+        .min()
+    else {
+        return;
+    };
+
+    let seed = layout_hash(
+        (component_index as u64).rotate_left(23)
+            ^ entry as u64
+            ^ (comp.len() as u64).rotate_left(41),
+    );
+    let phase = unit_hash(seed ^ 0xD2B7_4407_B1CE_6E93) * std::f32::consts::TAU;
+    let phase2 = unit_hash(seed ^ 0x69D5_7FC8_A2E4_7301) * std::f32::consts::TAU;
+    let turn_amplitude = 0.14 + 0.10 * unit_hash(seed ^ 0xA24B_AED4_963E_E407);
+    let secondary_amplitude = 0.025 + 0.035 * unit_hash(seed ^ 0x9FB2_1C65_1E98_DF25);
+    let wavelength =
+        physics_spacing * (7.0 + 3.0 * unit_hash(seed ^ 0x31D0_8C59_EA22_4A9B));
+
+    let mut position = [0.0_f32, 0.0_f32];
+    let mut distance = 0.0_f32;
+    let advance = |step: f32, position: &mut Pos2, distance: &mut f32| {
+        if step <= 0.0 {
+            return;
+        }
+        let midpoint = *distance + step * 0.5;
+        let theta = turn_amplitude
+            * (std::f32::consts::TAU * midpoint / wavelength + phase).sin()
+            + secondary_amplitude
+                * (std::f32::consts::TAU * midpoint / (wavelength * 0.57) + phase2).sin();
+        position[0] += step * theta.cos();
+        position[1] += step * theta.sin();
+        *distance += step;
+    };
+
+    let mut visited = 0usize;
+    while visited < comp.len() {
+        let node = entry / 2;
+        let count = node_pts_count[node];
+        let start = node_pts_start[node];
+        let segment_step = if count > 1 {
+            graph.nodes[node].visual_len / (count - 1) as f32
+        } else {
+            0.0
+        };
+
+        for j in 0..count {
+            let index = if entry % 2 == 0 { j } else { count - 1 - j };
+            positions[start + index] = position;
+            if j + 1 < count {
+                advance(segment_step, &mut position, &mut distance);
+            }
+        }
+
+        visited += 1;
+        let exit = entry ^ 1;
+        if ends[exit].is_empty() {
+            break;
+        }
+        advance(graph_edge_desired, &mut position, &mut distance);
+        entry = ends[exit][0];
+    }
+}
 
 // ── Layout ───────────────────────────────────────────────────────────────────
 
@@ -126,7 +234,9 @@ pub struct Layout {
     comp_ids: Vec<usize>,
     components: Vec<Vec<usize>>,
     circular: Vec<bool>,
+    linear: Vec<bool>,
     fixed: Vec<bool>,
+    physics_spacing: f32,
     active_points: Vec<usize>,
     grid: GridIndex,
     user_positioned: bool,
@@ -258,7 +368,9 @@ impl Layout {
                 comp_ids: Vec::new(),
                 components: Vec::new(),
                 circular: Vec::new(),
+                linear: Vec::new(),
                 fixed: Vec::new(),
+                physics_spacing: BANDAGE_NODE_SEGMENT_LENGTH,
                 active_points: Vec::new(),
                 grid: GridIndex::default(),
                 user_positioned: false,
@@ -271,7 +383,8 @@ impl Layout {
             };
         }
 
-        let k = AREA_PER_NODE.sqrt();
+        let physics_spacing = bandage_equivalent_spacing(graph);
+        let graph_edge_desired = physics_spacing * GRAPH_EDGE_RATIO;
 
         // ── Connected components ──────────────────────────────────────────────
         let adj = graph.build_adjacency();
@@ -308,11 +421,13 @@ impl Layout {
         }
 
         // ── Physics-node count per segment ────────────────────────────────────
-        // num_pts = max(2, floor(visual_len / k) + 1) clamped to [2, MAX_PTS]
+        // Match Bandage's ceil(drawn_len / nodeSegmentLength) + 1 sampling,
+        // translated back into Graphite's visible coordinate scale.
         let mut node_pts_count = vec![2usize; n];
         for ni in 0..n {
             let vl = graph.nodes[ni].visual_len;
-            node_pts_count[ni] = ((vl / k).floor() as usize + 1).clamp(2, MAX_PTS);
+            node_pts_count[ni] =
+                ((vl / physics_spacing).ceil() as usize + 1).clamp(2, MAX_PTS);
         }
         let total_pts: usize = node_pts_count.iter().sum();
 
@@ -344,6 +459,22 @@ impl Layout {
                     .all(|&v| ends[2 * v].len() == 1 && ends[2 * v + 1].len() == 1)
             })
             .collect();
+        let linear: Vec<bool> = components
+            .iter()
+            .map(|comp| {
+                let mut open_ends = 0usize;
+                let no_branches = comp.iter().all(|&v| {
+                    for endpoint in [2 * v, 2 * v + 1] {
+                        open_ends += usize::from(ends[endpoint].is_empty());
+                        if ends[endpoint].len() > 1 {
+                            return false;
+                        }
+                    }
+                    true
+                });
+                no_branches && open_ends == 2
+            })
+            .collect();
         let fixed: Vec<bool> = components
             .iter()
             .enumerate()
@@ -370,14 +501,16 @@ impl Layout {
             if circular[ci] {
                 let circumference: f32 = comp
                     .iter()
-                    .map(|&v| graph.nodes[v].visual_len.max(k) + k * GRAPH_EDGE_RATIO)
+                    .map(|&v| {
+                        graph.nodes[v].visual_len.max(physics_spacing) + graph_edge_desired
+                    })
                     .sum();
                 let radius = circumference / std::f32::consts::TAU;
                 let mut entry = comp[0] * 2;
                 let mut distance = 0.0;
                 for _ in 0..comp.len() {
                     let v = entry / 2;
-                    let len = graph.nodes[v].visual_len.max(k);
+                    let len = graph.nodes[v].visual_len.max(physics_spacing);
                     let count = node_pts_count[v];
                     for j in 0..count {
                         let angle = (distance + len * j as f32 / (count - 1) as f32) / radius;
@@ -385,11 +518,23 @@ impl Layout {
                         positions[node_pts_start[v] + index] =
                             [radius * angle.cos(), radius * angle.sin()];
                     }
-                    distance += len + k * GRAPH_EDGE_RATIO;
+                    distance += len + graph_edge_desired;
                     entry = ends[entry ^ 1][0];
                 }
+            } else if linear[ci] {
+                seed_linear_component(
+                    comp,
+                    ci,
+                    graph,
+                    &ends,
+                    &node_pts_start,
+                    &node_pts_count,
+                    &mut positions,
+                    physics_spacing,
+                    graph_edge_desired,
+                );
             } else {
-                // Start chains at a tip; use compact, length-aware BFS columns
+                // Start branching components at a tip; use compact, length-aware BFS columns
                 // for branching components.
                 let root = *comp.iter().min_by_key(|&&v| adj[v].len()).unwrap();
                 reverse[root] = ends[2 * root + 1].is_empty() && !ends[2 * root].is_empty();
@@ -422,12 +567,17 @@ impl Layout {
                 let area: f32 = widths
                     .iter()
                     .zip(&counts)
-                    .map(|(&w, &count)| (w + k) * k * 2.0 * count as f32)
+                    .map(|(&w, &count)| {
+                        (w + physics_spacing) * physics_spacing * 2.0 * count as f32
+                    })
                     .sum();
-                let max_rows = (area.sqrt() / (k * 2.0)).ceil().max(1.0) as usize;
+                let max_rows =
+                    (area.sqrt() / (physics_spacing * 2.0)).ceil().max(1.0) as usize;
                 let mut x = vec![0.0; widths.len()];
                 for d in 1..x.len() {
-                    x[d] = x[d - 1] + counts[d - 1].div_ceil(max_rows) as f32 * (widths[d - 1] + k);
+                    x[d] = x[d - 1]
+                        + counts[d - 1].div_ceil(max_rows) as f32
+                            * (widths[d - 1] + physics_spacing);
                 }
                 let mut rows = vec![0; widths.len()];
                 for v in queue {
@@ -435,7 +585,7 @@ impl Layout {
                     let column = rows[d] / max_rows;
                     let y = ((rows[d] % max_rows) as f32
                         - (counts[d].min(max_rows) - 1) as f32 * 0.5)
-                        * k
+                        * physics_spacing
                         * 2.0;
                     rows[d] += 1;
                     let count = node_pts_count[v];
@@ -468,7 +618,6 @@ impl Layout {
             .collect();
 
         // ── Build spring list (SoA for cache efficiency) ──────────────────────
-        let graph_edge_desired = k * GRAPH_EDGE_RATIO;
         let mut springs_a: Vec<u32> = Vec::new();
         let mut springs_b: Vec<u32> = Vec::new();
         let mut springs_desired: Vec<f32> = Vec::new();
@@ -519,6 +668,21 @@ impl Layout {
                 _ => graph_edge_desired,
             };
             push_spring(pu, pv, desired, SPRING_LINK);
+
+            if linear[comp_ids[u]] && u != v {
+                let u_start = node_pts_start[u];
+                let v_start = node_pts_start[v];
+                let u_inner = if pu == u_start { pu + 1 } else { pu - 1 };
+                let v_inner = if pv == v_start { pv + 1 } else { pv - 1 };
+                let u_step = graph.nodes[u].visual_len / (node_pts_count[u] - 1) as f32;
+                let v_step = graph.nodes[v].visual_len / (node_pts_count[v] - 1) as f32;
+                push_spring(
+                    u_inner,
+                    v_inner,
+                    u_step + desired + v_step,
+                    SPRING_LINEAR_BEND,
+                );
+            }
         }
 
         let disp = vec![[0.0_f32; 2]; total_pts];
@@ -537,7 +701,9 @@ impl Layout {
             comp_ids,
             components,
             circular,
+            linear,
             fixed,
+            physics_spacing,
             active_points,
             grid: GridIndex::default(),
             user_positioned: false,
@@ -553,6 +719,7 @@ impl Layout {
             LayoutBackend::Bandage => layout.seed_with_bandage(graph),
             LayoutBackend::Rust => layout.seed_with_rust(graph),
         };
+        layout.orient_tall_components();
         layout.pack_components();
         layout
     }
@@ -578,7 +745,7 @@ impl Layout {
         let mut to = Vec::new();
         let mut lengths = Vec::new();
         for v in 0..self.num_nodes() {
-            if self.fixed[self.comp_ids[v]] {
+            if self.fixed[self.comp_ids[v]] || self.linear[self.comp_ids[v]] {
                 continue;
             }
             let count = self.node_pts_count[v];
@@ -605,9 +772,17 @@ impl Layout {
             if self.springs_stiff[i] != SPRING_LINK {
                 continue;
             }
-            from.push(indices[self.springs_a[i] as usize]);
-            to.push(indices[self.springs_b[i] as usize]);
+            let a = indices[self.springs_a[i] as usize];
+            let b = indices[self.springs_b[i] as usize];
+            if a == u32::MAX || b == u32::MAX {
+                continue;
+            }
+            from.push(a);
+            to.push(b);
             lengths.push(self.springs_desired[i]);
+        }
+        if samples.is_empty() {
+            return true;
         }
         let mut output = vec![[0.0_f32; 2]; samples.len()];
         // SAFETY: buffers have the declared lengths, endpoint indices refer to
@@ -662,7 +837,7 @@ impl Layout {
         let mut lengths = Vec::new();
 
         for v in 0..self.num_nodes() {
-            if self.fixed[self.comp_ids[v]] {
+            if self.fixed[self.comp_ids[v]] || self.linear[self.comp_ids[v]] {
                 continue;
             }
             let count = self.node_pts_count[v];
@@ -701,6 +876,9 @@ impl Layout {
             lengths.push(self.springs_desired[i]);
         }
 
+        if samples.is_empty() {
+            return true;
+        }
         let initial: Vec<Pos2> = samples.iter().map(|&pi| self.positions[pi]).collect();
         let mut output = vec![[0.0_f32; 2]; samples.len()];
         if let Err(error) = rust_layout::initial_layout(
@@ -735,9 +913,39 @@ impl Layout {
         true
     }
 
+    /// Rotate tall solved components by 90 degrees before packing. Bandage
+    /// performs a more expensive angle sweep for the same purpose; this cheap
+    /// pass keeps elongated components horizontal in the overview.
+    fn orient_tall_components(&mut self) {
+        for ci in 0..self.components.len() {
+            let mut lo = [f32::INFINITY; 2];
+            let mut hi = [f32::NEG_INFINITY; 2];
+            for &v in &self.components[ci] {
+                for p in self.pts(v) {
+                    lo[0] = lo[0].min(p[0]);
+                    lo[1] = lo[1].min(p[1]);
+                    hi[0] = hi[0].max(p[0]);
+                    hi[1] = hi[1].max(p[1]);
+                }
+            }
+            if hi[1] - lo[1] <= hi[0] - lo[0] {
+                continue;
+            }
+            for &v in &self.components[ci] {
+                let start = self.node_pts_start[v];
+                let count = self.node_pts_count[v];
+                for p in &mut self.positions[start..start + count] {
+                    let old_x = p[0];
+                    p[0] = -p[1];
+                    p[1] = old_x;
+                }
+            }
+        }
+    }
+
     /// Pack actual polyline bounds, including long singletons and circles.
     fn pack_components(&mut self) {
-        let gap = AREA_PER_NODE.sqrt() * 3.0;
+        let gap = self.physics_spacing * 3.0;
         let bounds: Vec<_> = self
             .components
             .iter()
@@ -851,7 +1059,7 @@ impl Layout {
             self.converged = attractor.is_none();
             return;
         }
-        let k = AREA_PER_NODE.sqrt();
+        let k = self.physics_spacing;
         // Normal relaxation cools over time to settle the graph. During an
         // active grab, keep a larger non-decaying movement allowance so linked
         // segments can continue following even after a long or very large drag.
