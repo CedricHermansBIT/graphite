@@ -1,4 +1,6 @@
 use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::gfa::Strand;
@@ -69,12 +71,99 @@ const DRAG_MOVE_LIMIT_SCALE: f32 = 0.25;
 /// the grabbed point instead of translating as a rigid polyline.
 const DRAG_FALLOFF_STRENGTH: f32 = 100.0;
 
-/// Position-based rope constraints for topology-proven linear components.
-/// Adjacent distances are inextensible; skip-one constraints preserve the
-/// contig's local bend so repeated dragging cannot slowly straighten a curved
-/// segment and make it look longer.
-const LINEAR_ROPE_ITERATIONS: usize = 12;
-const LINEAR_BEND_CONSTRAINT_STIFFNESS: f32 = 0.90;
+/// Interactive manipulation uses Position-Based Dynamics rather than the
+/// force-directed layout solver. Distance constraints are intentionally hard:
+/// softness comes from bending and free graph junctions, not from stretching.
+const PBD_ITERATIONS: usize = 12;
+const PBD_BEND_STIFFNESS: f32 = 0.18;
+const PBD_RING_AREA_STIFFNESS: f32 = 0.08;
+
+#[derive(Clone, Copy, Debug)]
+struct PbdDistanceConstraint {
+    a: usize,
+    b: usize,
+    rest: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PbdBendConstraint {
+    a: usize,
+    b: usize,
+    rest: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeapState {
+    cost: f32,
+    node: usize,
+}
+
+impl PartialEq for HeapState {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node && self.cost.to_bits() == other.cost.to_bits()
+    }
+}
+impl Eq for HeapState {}
+impl Ord for HeapState {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .cost
+            .total_cmp(&self.cost)
+            .then_with(|| other.node.cmp(&self.node))
+    }
+}
+impl PartialOrd for HeapState {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn polygon_signed_area(positions: &[Pos2], path: &[usize]) -> f32 {
+    if path.len() < 3 {
+        return 0.0;
+    }
+    let mut twice_area = 0.0_f32;
+    for index in 0..path.len() {
+        let a = positions[path[index]];
+        let b = positions[path[(index + 1) % path.len()]];
+        twice_area += a[0] * b[1] - b[0] * a[1];
+    }
+    twice_area * 0.5
+}
+
+fn preserve_ring_area(
+    positions: &mut [Pos2],
+    path: &[usize],
+    target_area: f32,
+    pinned: usize,
+    stiffness: f32,
+) {
+    if path.len() < 3 || target_area.abs() <= 0.001 {
+        return;
+    }
+    let current = polygon_signed_area(positions, path);
+    if current.abs() <= 0.001 {
+        return;
+    }
+
+    let mut center = [0.0_f32; 2];
+    for &pi in path {
+        center[0] += positions[pi][0];
+        center[1] += positions[pi][1];
+    }
+    center[0] /= path.len() as f32;
+    center[1] /= path.len() as f32;
+
+    let desired_scale = (target_area.abs() / current.abs()).sqrt();
+    let scale = (1.0 + (desired_scale - 1.0) * stiffness).clamp(0.95, 1.05);
+    for &pi in path {
+        if pi == pinned {
+            continue;
+        }
+        positions[pi][0] = center[0] + (positions[pi][0] - center[0]) * scale;
+        positions[pi][1] = center[1] + (positions[pi][1] - center[1]) * scale;
+    }
+}
 
 fn bandage_equivalent_spacing(graph: &ViewGraph) -> f32 {
     if graph.nodes.is_empty() {
@@ -285,6 +374,21 @@ pub struct Layout {
     /// Initial distance between physics point j and j+2 inside each contig.
     /// These are bending constraints, not graph-link constraints.
     linear_bend_rest: Vec<Vec<f32>>,
+
+    /// Generic PBD interaction graph used for linear, branched, circular and
+    /// isolated components. Distance constraints include both within-contig
+    /// links and GFA links; bend constraints exist only inside contigs.
+    pbd_distances: Vec<PbdDistanceConstraint>,
+    pbd_bends: Vec<PbdBendConstraint>,
+    pbd_component_distances: Vec<Vec<usize>>,
+    pbd_component_bends: Vec<Vec<usize>>,
+    pbd_particles: Vec<Vec<usize>>,
+    pbd_adjacency: Vec<Vec<(usize, f32)>>,
+    pbd_ring_paths: Vec<Vec<usize>>,
+    pbd_ring_area: Vec<f32>,
+    drag_anchor: Option<usize>,
+    drag_lra: Vec<f32>,
+
     physics_spacing: f32,
     active_points: Vec<usize>,
     grid: GridIndex,
@@ -448,6 +552,16 @@ impl Layout {
                 linear_path_pos: Vec::new(),
                 linear_rest_lengths: Vec::new(),
                 linear_bend_rest: Vec::new(),
+                pbd_distances: Vec::new(),
+                pbd_bends: Vec::new(),
+                pbd_component_distances: Vec::new(),
+                pbd_component_bends: Vec::new(),
+                pbd_particles: Vec::new(),
+                pbd_adjacency: Vec::new(),
+                pbd_ring_paths: Vec::new(),
+                pbd_ring_area: Vec::new(),
+                drag_anchor: None,
+                drag_lra: Vec::new(),
                 physics_spacing: BANDAGE_NODE_SEGMENT_LENGTH,
                 active_points: Vec::new(),
                 grid: GridIndex::default(),
@@ -756,6 +870,100 @@ impl Layout {
                 .collect();
         }
 
+        // ── Generic PBD interaction topology ────────────────────────────────
+        // This graph is independent of the FMMM/Rust layout solver. It is used
+        // only while the user manipulates a component.
+        let mut pbd_distances: Vec<PbdDistanceConstraint> = Vec::new();
+        let mut pbd_bends: Vec<PbdBendConstraint> = Vec::new();
+        let mut pbd_component_distances = vec![Vec::new(); components.len()];
+        let mut pbd_component_bends = vec![Vec::new(); components.len()];
+        let mut pbd_seen = HashSet::<(usize, usize)>::new();
+
+        for node in 0..n {
+            let ci = comp_ids[node];
+            let start = node_pts_start[node];
+            let count = node_pts_count[node];
+
+            for j in 0..count.saturating_sub(1) {
+                let a = start + j;
+                let b = start + j + 1;
+                let key = if a < b { (a, b) } else { (b, a) };
+                if pbd_seen.insert(key) {
+                    let index = pbd_distances.len();
+                    pbd_distances.push(PbdDistanceConstraint { a, b, rest: 0.0 });
+                    pbd_component_distances[ci].push(index);
+                }
+            }
+            for j in 0..count.saturating_sub(2) {
+                let index = pbd_bends.len();
+                pbd_bends.push(PbdBendConstraint {
+                    a: start + j,
+                    b: start + j + 2,
+                    rest: 0.0,
+                });
+                pbd_component_bends[ci].push(index);
+            }
+        }
+
+        for edge in &graph.edges {
+            if edge.from >= n || edge.to >= n {
+                continue;
+            }
+            let a = match edge.from_strand {
+                Strand::Forward => node_pts_start[edge.from] + node_pts_count[edge.from] - 1,
+                Strand::Reverse => node_pts_start[edge.from],
+            };
+            let b = match edge.to_strand {
+                Strand::Forward => node_pts_start[edge.to],
+                Strand::Reverse => node_pts_start[edge.to] + node_pts_count[edge.to] - 1,
+            };
+            if a == b {
+                continue;
+            }
+            let key = if a < b { (a, b) } else { (b, a) };
+            if pbd_seen.insert(key) {
+                let ci = comp_ids[edge.from];
+                let index = pbd_distances.len();
+                pbd_distances.push(PbdDistanceConstraint { a, b, rest: 0.0 });
+                pbd_component_distances[ci].push(index);
+            }
+        }
+
+        let pbd_particles: Vec<Vec<usize>> = components
+            .iter()
+            .map(|comp| {
+                comp.iter()
+                    .flat_map(|&node| {
+                        let start = node_pts_start[node];
+                        start..start + node_pts_count[node]
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Circular components get an ordered closed path for a weak area
+        // preservation constraint. Branched cyclic components deliberately do
+        // not: their topology is handled by generic graph constraints instead.
+        let mut pbd_ring_paths = vec![Vec::new(); components.len()];
+        for (ci, comp) in components.iter().enumerate() {
+            if !circular[ci] || comp.is_empty() {
+                continue;
+            }
+            let mut entry = comp[0] * 2;
+            let path = &mut pbd_ring_paths[ci];
+            for _ in 0..comp.len() {
+                let node = entry / 2;
+                let start = node_pts_start[node];
+                let count = node_pts_count[node];
+                if entry % 2 == 0 {
+                    path.extend(start..start + count);
+                } else {
+                    path.extend((start..start + count).rev());
+                }
+                entry = ends[entry ^ 1][0];
+            }
+        }
+
         let active_points: Vec<_> = (0..total_pts)
             .filter(|&pi| !fixed[comp_ids[phys_to_node[pi] as usize]])
             .collect();
@@ -850,6 +1058,16 @@ impl Layout {
             linear_path_pos,
             linear_rest_lengths,
             linear_bend_rest,
+            pbd_distances,
+            pbd_bends,
+            pbd_component_distances,
+            pbd_component_bends,
+            pbd_particles,
+            pbd_adjacency: vec![Vec::new(); total_pts],
+            pbd_ring_paths,
+            pbd_ring_area: vec![0.0; components.len()],
+            drag_anchor: None,
+            drag_lra: vec![f32::INFINITY; total_pts],
             physics_spacing,
             active_points,
             grid: GridIndex::default(),
@@ -868,6 +1086,7 @@ impl Layout {
         };
         layout.orient_tall_components();
         layout.pack_components();
+        layout.refresh_pbd_rest_geometry();
         layout
     }
 
