@@ -1036,6 +1036,7 @@ impl Layout {
             }
         }
 
+        let component_count = components.len();
         let disp = vec![[0.0_f32; 2]; total_pts];
         let prev_drag_force = vec![[0.0_f32; 2]; total_pts];
 
@@ -1065,7 +1066,7 @@ impl Layout {
             pbd_particles,
             pbd_adjacency: vec![Vec::new(); total_pts],
             pbd_ring_paths,
-            pbd_ring_area: vec![0.0; components.len()],
+            pbd_ring_area: vec![0.0; component_count],
             drag_anchor: None,
             drag_lra: vec![f32::INFINITY; total_pts],
             physics_spacing,
@@ -1371,19 +1372,179 @@ impl Layout {
         }
     }
 
+    /// Capture the final layout geometry as the rest state for interactive
+    /// PBD manipulation. This runs after FMMM/Rust placement, orientation and
+    /// packing so the first grab never snaps to a different spring geometry.
+    fn refresh_pbd_rest_geometry(&mut self) {
+        let positions = &self.positions;
+        for constraint in &mut self.pbd_distances {
+            let a = positions[constraint.a];
+            let b = positions[constraint.b];
+            constraint.rest = (b[0] - a[0]).hypot(b[1] - a[1]).max(0.001);
+        }
+        for constraint in &mut self.pbd_bends {
+            let a = positions[constraint.a];
+            let b = positions[constraint.b];
+            constraint.rest = (b[0] - a[0]).hypot(b[1] - a[1]).max(0.001);
+        }
+
+        for neighbours in &mut self.pbd_adjacency {
+            neighbours.clear();
+        }
+        for constraint in &self.pbd_distances {
+            self.pbd_adjacency[constraint.a].push((constraint.b, constraint.rest));
+            self.pbd_adjacency[constraint.b].push((constraint.a, constraint.rest));
+        }
+
+        for ci in 0..self.pbd_ring_paths.len() {
+            self.pbd_ring_area[ci] =
+                polygon_signed_area(&self.positions, &self.pbd_ring_paths[ci]);
+        }
+    }
+
+    /// Start or retarget a PBD grab and compute Long Range Attachment limits.
+    /// The LRA radius for every particle is its shortest rest-length path from
+    /// the grabbed particle through the component's constraint graph.
+    fn prepare_pbd_drag(&mut self, pi: usize) -> Option<usize> {
+        if pi >= self.positions.len() {
+            return None;
+        }
+        let node = self.phys_to_node[pi] as usize;
+        let ci = self.comp_ids[node];
+        if self.drag_anchor == Some(pi) && self.drag_component == Some(ci) {
+            return Some(ci);
+        }
+
+        self.drag_component = Some(ci);
+        self.drag_anchor = Some(pi);
+        self.drag_lra.fill(f32::INFINITY);
+        self.drag_lra[pi] = 0.0;
+
+        let mut heap = BinaryHeap::new();
+        heap.push(HeapState { cost: 0.0, node: pi });
+
+        while let Some(HeapState { cost, node }) = heap.pop() {
+            if cost > self.drag_lra[node] {
+                continue;
+            }
+            for &(next, weight) in &self.pbd_adjacency[node] {
+                let next_node = self.phys_to_node[next] as usize;
+                if self.comp_ids[next_node] != ci {
+                    continue;
+                }
+                let next_cost = cost + weight;
+                if next_cost < self.drag_lra[next] {
+                    self.drag_lra[next] = next_cost;
+                    heap.push(HeapState {
+                        cost: next_cost,
+                        node: next,
+                    });
+                }
+            }
+        }
+
+        Some(ci)
+    }
+
+    fn project_lra(&mut self, ci: usize, pinned: usize) {
+        let anchor = self.positions[pinned];
+        for &pi in &self.pbd_particles[ci] {
+            if pi == pinned {
+                continue;
+            }
+            let max_distance = self.drag_lra[pi];
+            if !max_distance.is_finite() {
+                continue;
+            }
+            let dx = self.positions[pi][0] - anchor[0];
+            let dy = self.positions[pi][1] - anchor[1];
+            let distance = dx.hypot(dy);
+            if distance > max_distance && distance > 0.001 {
+                let scale = max_distance / distance;
+                self.positions[pi] = [anchor[0] + dx * scale, anchor[1] + dy * scale];
+            }
+        }
+    }
+
+    /// Generic Position-Based Dynamics manipulation for every component type.
+    /// Hard distance constraints prevent stretch, LRA prevents slow global
+    /// extension on long/branched graphs, soft skip-one constraints provide
+    /// bend resistance inside contigs, and circular components weakly preserve
+    /// their enclosed area. GFA junctions have no bend constraint and therefore
+    /// remain flexible hinges.
+    fn drag_pbd_to(&mut self, pos: Pos2, pi: usize) -> bool {
+        let Some(ci) = self.prepare_pbd_drag(pi) else {
+            return false;
+        };
+
+        self.user_positioned = true;
+
+        for _ in 0..PBD_ITERATIONS {
+            self.positions[pi] = pos;
+
+            // Global anti-stretch first, so distant branches respond
+            // immediately instead of waiting for local corrections to travel.
+            self.project_lra(ci, pi);
+
+            for &index in &self.pbd_component_distances[ci] {
+                let c = self.pbd_distances[index];
+                satisfy_distance_constraint(
+                    &mut self.positions,
+                    c.a,
+                    c.b,
+                    c.rest,
+                    pi,
+                    1.0,
+                );
+            }
+            for &index in self.pbd_component_distances[ci].iter().rev() {
+                let c = self.pbd_distances[index];
+                satisfy_distance_constraint(
+                    &mut self.positions,
+                    c.a,
+                    c.b,
+                    c.rest,
+                    pi,
+                    1.0,
+                );
+            }
+
+            for &index in &self.pbd_component_bends[ci] {
+                let c = self.pbd_bends[index];
+                satisfy_distance_constraint(
+                    &mut self.positions,
+                    c.a,
+                    c.b,
+                    c.rest,
+                    pi,
+                    PBD_BEND_STIFFNESS,
+                );
+            }
+
+            if !self.pbd_ring_paths[ci].is_empty() {
+                preserve_ring_area(
+                    &mut self.positions,
+                    &self.pbd_ring_paths[ci],
+                    self.pbd_ring_area[ci],
+                    pi,
+                    PBD_RING_AREA_STIFFNESS,
+                );
+            }
+
+            self.positions[pi] = pos;
+            self.project_lra(ci, pi);
+        }
+
+        self.positions[pi] = pos;
+        true
+    }
+
     /// Apply the same drag behavior used by the background layout worker to
     /// the UI snapshot for immediate feedback. Keeping both paths identical is
     /// important: using generic drag_to() in the UI while the worker applies
     /// rope constraints makes the two layouts fight and causes visible jumps.
     pub fn drag_preview_to(&mut self, pos: Pos2, pi: usize) {
-        if pi >= self.positions.len() {
-            return;
-        }
-        let node = self.phys_to_node[pi] as usize;
-        let ci = self.comp_ids[node];
-        if self.linear[ci] && !self.fixed[ci] {
-            let _ = self.drag_linear_rope_to(pos, pi);
-        } else {
+        if !self.drag_pbd_to(pos, pi) {
             self.drag_to(pos, pi);
         }
     }
@@ -1545,20 +1706,9 @@ impl Layout {
         let _ = graph;
         let attractor = attractor.filter(|(_, pi)| *pi < total_pts);
         if let Some((pos, pi)) = attractor {
-            let node = self.phys_to_node[pi] as usize;
-            let ci = self.comp_ids[node];
-
-            if self.linear[ci] && !self.fixed[ci] {
-                let _ = self.drag_linear_rope_to(pos, pi);
-            } else {
-                // Match Bandage's interactive editing model: dragging changes
-                // the selected contig geometry directly, but does not wake the
-                // force-directed solver. Running FR repulsion/springs while a
-                // branched component is being grabbed can inject very large
-                // forces at branch points and make the component "explode".
+            if !self.drag_pbd_to(pos, pi) {
                 self.drag_to(pos, pi);
             }
-
             for force in &mut self.prev_drag_force {
                 *force = [0.0, 0.0];
             }
@@ -1566,10 +1716,10 @@ impl Layout {
             self.converged = false;
             return;
         } else if self.drag_component.take().is_some() {
-            // Manual graph edits are kept as placed. Bandage likewise redraws
-            // connected edges after a drag instead of immediately rerunning
-            // FMMM. This also prevents a release frame from applying a large
-            // accumulated force to a branched component.
+            // PBD already leaves a valid constraint-satisfying geometry. Keep
+            // the manual placement instead of waking FMMM/FR on release.
+            self.drag_anchor = None;
+            self.drag_lra.fill(f32::INFINITY);
             for force in &mut self.prev_drag_force {
                 *force = [0.0, 0.0];
             }
