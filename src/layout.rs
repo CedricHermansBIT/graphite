@@ -1229,30 +1229,35 @@ impl Layout {
         if let Some((pos, pi)) = attractor {
             let node = self.phys_to_node[pi] as usize;
             let ci = self.comp_ids[node];
-            if self.linear[ci] && !self.fixed[ci] && self.drag_linear_rope_to(pos, pi) {
-                for force in &mut self.prev_drag_force {
-                    *force = [0.0, 0.0];
-                }
-                self.iteration += 1;
-                self.converged = false;
-                return;
+
+            if self.linear[ci] && !self.fixed[ci] {
+                let _ = self.drag_linear_rope_to(pos, pi);
+            } else {
+                // Match Bandage's interactive editing model: dragging changes
+                // the selected contig geometry directly, but does not wake the
+                // force-directed solver. Running FR repulsion/springs while a
+                // branched component is being grabbed can inject very large
+                // forces at branch points and make the component "explode".
+                self.drag_to(pos, pi);
             }
-            self.drag_to(pos, pi);
-        } else if let Some(ci) = self.drag_component {
-            if self.linear[ci] {
-                // The rope constraint already leaves a valid, non-stretched
-                // linear geometry. Do not wake the generic FR relaxation on
-                // release: its near-field repulsion uses a different force
-                // model from the initial FMMM layout and can blow short graph
-                // links apart.
-                self.drag_component = None;
-                for force in &mut self.prev_drag_force {
-                    *force = [0.0, 0.0];
-                }
-                self.iteration += 1;
-                self.converged = true;
-                return;
+
+            for force in &mut self.prev_drag_force {
+                *force = [0.0, 0.0];
             }
+            self.iteration += 1;
+            self.converged = false;
+            return;
+        } else if self.drag_component.take().is_some() {
+            // Manual graph edits are kept as placed. Bandage likewise redraws
+            // connected edges after a drag instead of immediately rerunning
+            // FMMM. This also prevents a release frame from applying a large
+            // accumulated force to a branched component.
+            for force in &mut self.prev_drag_force {
+                *force = [0.0, 0.0];
+            }
+            self.iteration += 1;
+            self.converged = true;
+            return;
         }
 
         if self.active_points.is_empty() || self.drag_component.is_some_and(|ci| self.fixed[ci]) {
@@ -1837,6 +1842,39 @@ mod tests {
                 rest[index]
             );
         }
+    }
+
+    #[test]
+    fn dragging_branched_component_does_not_run_force_solver() {
+        use Strand::Forward as F;
+        let graph = graph(
+            &[1200.0, 1200.0, 1200.0, 1200.0],
+            &[(0, F, 1, F), (0, F, 2, F), (0, F, 3, F)],
+        );
+        let mut layout = Layout::new_with_graph(&graph);
+        let ci = layout.comp_ids[0];
+        assert!(!layout.linear[ci]);
+
+        let before_1 = layout.pts(1).to_vec();
+        let before_2 = layout.pts(2).to_vec();
+        let before_3 = layout.pts(3).to_vec();
+
+        let grabbed = layout.node_pts_start[0] + layout.node_pts_count[0] / 2;
+        let target = [
+            layout.positions[grabbed][0] + 500.0,
+            layout.positions[grabbed][1] + 200.0,
+        ];
+        layout.step(&graph, &LayoutParams::default(), Some((target, grabbed)));
+
+        assert_eq!(layout.positions[grabbed], target);
+        assert_eq!(layout.pts(1), before_1.as_slice());
+        assert_eq!(layout.pts(2), before_2.as_slice());
+        assert_eq!(layout.pts(3), before_3.as_slice());
+
+        let before_release = layout.positions.clone();
+        layout.step(&graph, &LayoutParams::default(), None);
+        assert_eq!(layout.positions, before_release);
+        assert!(layout.converged);
     }
 
     #[test]
