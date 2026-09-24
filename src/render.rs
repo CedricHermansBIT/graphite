@@ -13,6 +13,147 @@ use crate::graph::{EdgeKind, NodeInfo, ViewGraph};
 use crate::layout::Layout;
 use crate::selection::Selection;
 
+/// Geometry derived from a settled layout and reused while only pan/zoom changes.
+/// The application discards it whenever layout positions change.
+pub struct RenderCache {
+    pub revision: usize,
+    node_bounds: Vec<([f32; 2], [f32; 2])>,
+    world_bounds: ([f32; 2], [f32; 2]),
+    overview_nodes: Vec<usize>,
+    edge_endpoints: Vec<([f32; 2], [f32; 2])>,
+    /// Longest edges first, so subpixel edges can be skipped without scanning.
+    edges_by_span: Vec<(f32, usize)>,
+}
+
+impl RenderCache {
+    pub fn new(graph: &ViewGraph, layout: &Layout) -> Self {
+        let mut world_low = [f32::INFINITY; 2];
+        let mut world_high = [f32::NEG_INFINITY; 2];
+        let node_bounds = (0..graph.node_count())
+            .map(|node| {
+                let mut low = [f32::INFINITY; 2];
+                let mut high = [f32::NEG_INFINITY; 2];
+                for &point in layout.pts(node) {
+                    low[0] = low[0].min(point[0]);
+                    low[1] = low[1].min(point[1]);
+                    high[0] = high[0].max(point[0]);
+                    high[1] = high[1].max(point[1]);
+                }
+                world_low[0] = world_low[0].min(low[0]);
+                world_low[1] = world_low[1].min(low[1]);
+                world_high[0] = world_high[0].max(high[0]);
+                world_high[1] = world_high[1].max(high[1]);
+                (low, high)
+            })
+            .collect::<Vec<_>>();
+
+        // At a fitted overview, many nodes land in the same few pixels. Keep
+        // one representative per world-space cell, but retain long segments
+        // whose geometry spans a cell. Selection is added at draw time.
+        const GRID_WIDTH: usize = 384;
+        const GRID_HEIGHT: usize = 256;
+        let cell_w = (world_high[0] - world_low[0]).max(1.0) / GRID_WIDTH as f32;
+        let cell_h = (world_high[1] - world_low[1]).max(1.0) / GRID_HEIGHT as f32;
+        let mut grid = vec![usize::MAX; GRID_WIDTH * GRID_HEIGHT];
+        let mut overview_nodes = Vec::new();
+        for (node, &(low, high)) in node_bounds.iter().enumerate() {
+            if high[0] - low[0] > cell_w || high[1] - low[1] > cell_h {
+                overview_nodes.push(node);
+                continue;
+            }
+            let point = layout.center(node);
+            let x = ((point[0] - world_low[0]) / cell_w) as usize;
+            let y = ((point[1] - world_low[1]) / cell_h) as usize;
+            let cell = &mut grid[y.min(GRID_HEIGHT - 1) * GRID_WIDTH + x.min(GRID_WIDTH - 1)];
+            if *cell == usize::MAX {
+                *cell = node;
+            }
+        }
+        overview_nodes.extend(grid.into_iter().filter(|&node| node != usize::MAX));
+        overview_nodes.sort_unstable();
+
+        let edge_endpoints = graph
+            .edges
+            .iter()
+            .map(|edge| {
+                if edge.from >= layout.num_nodes() || edge.to >= layout.num_nodes() {
+                    return ([f32::NAN; 2], [f32::NAN; 2]);
+                }
+                let from = match edge.from_strand {
+                    Strand::Forward => layout.end(edge.from),
+                    Strand::Reverse => layout.start(edge.from),
+                };
+                let to = match edge.to_strand {
+                    Strand::Forward => layout.start(edge.to),
+                    Strand::Reverse => layout.end(edge.to),
+                };
+                (from, to)
+            })
+            .collect::<Vec<_>>();
+        let mut edges_by_span = edge_endpoints
+            .iter()
+            .enumerate()
+            .map(|(index, (from, to))| {
+                let dx = from[0] - to[0];
+                let dy = from[1] - to[1];
+                (dx * dx + dy * dy, index)
+            })
+            .collect::<Vec<_>>();
+        edges_by_span.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        Self {
+            revision: layout.revision(),
+            node_bounds,
+            world_bounds: (world_low, world_high),
+            overview_nodes,
+            edge_endpoints,
+            edges_by_span,
+        }
+    }
+}
+
+/// A screen-sized occupancy map avoids a million hash probes at overview zoom.
+struct DotCells {
+    left: i32,
+    top: i32,
+    width: usize,
+    height: usize,
+    occupied: Vec<u8>,
+}
+
+impl DotCells {
+    fn new(viewport: Rect) -> Self {
+        const CELL: f32 = 3.0;
+        const MARGIN: f32 = 45.0; // larger than the maximum dot radius
+        let left = ((viewport.left() - MARGIN) / CELL).floor() as i32;
+        let top = ((viewport.top() - MARGIN) / CELL).floor() as i32;
+        let right = ((viewport.right() + MARGIN) / CELL).floor() as i32;
+        let bottom = ((viewport.bottom() + MARGIN) / CELL).floor() as i32;
+        let width = (right - left + 1).max(0) as usize;
+        let height = (bottom - top + 1).max(0) as usize;
+        Self {
+            left,
+            top,
+            width,
+            height,
+            occupied: vec![0; width.saturating_mul(height)],
+        }
+    }
+
+    fn insert(&mut self, point: Pos2) -> bool {
+        let x = (point.x / 3.0).floor() as i32 - self.left;
+        let y = (point.y / 3.0).floor() as i32 - self.top;
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return false;
+        }
+        let cell = &mut self.occupied[y as usize * self.width + x as usize];
+        if *cell != 0 {
+            return false;
+        }
+        *cell = 1;
+        true
+    }
+}
+
 pub struct RenderParams {
     pub zoom: f32,
     pub pan: Vec2,
@@ -77,6 +218,38 @@ pub fn draw_graph(
     selection: &Selection,
     params: &RenderParams,
 ) {
+    draw_graph_inner(painter, viewport, graph, layout, selection, params, None);
+}
+
+pub fn draw_graph_cached(
+    painter: &Painter,
+    viewport: Rect,
+    graph: &ViewGraph,
+    layout: &Layout,
+    selection: &Selection,
+    params: &RenderParams,
+    cache: &RenderCache,
+) {
+    draw_graph_inner(
+        painter,
+        viewport,
+        graph,
+        layout,
+        selection,
+        params,
+        Some(cache),
+    );
+}
+
+fn draw_graph_inner(
+    painter: &Painter,
+    viewport: Rect,
+    graph: &ViewGraph,
+    layout: &Layout,
+    selection: &Selection,
+    params: &RenderParams,
+    cache: Option<&RenderCache>,
+) {
     let transform = |world: [f32; 2]| -> Pos2 {
         Pos2::new(
             world[0] * params.zoom + params.pan.x + viewport.center().x,
@@ -90,11 +263,45 @@ pub fn draw_graph(
     // Segment half-width in screen pixels. Bandage uses a fixed pixel width that
     // scales modestly with zoom so nodes stay visible when zoomed out.
     let half_h = (8.0 * params.node_scale * lod.sqrt()).clamp(1.5, 40.0);
+    let margin = (half_h + 4.0) / lod.max(1e-9);
+    let world_min = [
+        (viewport.left() - viewport.center().x - params.pan.x) / lod.max(1e-9) - margin,
+        (viewport.top() - viewport.center().y - params.pan.y) / lod.max(1e-9) - margin,
+    ];
+    let world_max = [
+        (viewport.right() - viewport.center().x - params.pan.x) / lod.max(1e-9) + margin,
+        (viewport.bottom() - viewport.center().y - params.pan.y) / lod.max(1e-9) + margin,
+    ];
 
     // --- Draw edges first (under nodes) ---
     let edge_alpha = (params.edge_opacity * 255.0) as u8;
     if lod > params.edge_visible_min_zoom {
-        for edge in &graph.edges {
+        // This is the same one-pixel test used below, evaluated against cached
+        // world-space spans. Keep a small margin for floating-point rounding.
+        let long_edges = cache
+            .filter(|_| selection.edges.is_empty())
+            .and_then(|cache| {
+                let cutoff_sq = 0.9 / (lod * lod);
+                let end = cache
+                    .edges_by_span
+                    .partition_point(|(span_sq, _)| *span_sq >= cutoff_sq);
+                if end >= graph.edges.len() / 4 {
+                    return None;
+                }
+                let mut indices = cache.edges_by_span[..end]
+                    .iter()
+                    .map(|&(_, index)| index)
+                    .collect::<Vec<_>>();
+                // Keep the original painter order at edge crossings.
+                indices.sort_unstable();
+                Some(indices)
+            });
+        let edge_count = long_edges.as_ref().map_or(graph.edges.len(), Vec::len);
+        for position in 0..edge_count {
+            let edge_index = long_edges
+                .as_ref()
+                .map_or(position, |edges| edges[position]);
+            let edge = &graph.edges[edge_index];
             if edge.from >= num_nodes || edge.to >= num_nodes {
                 continue;
             }
@@ -102,14 +309,28 @@ pub fn draw_graph(
             // Connect the correct endpoint of each segment based on strand:
             //   Forward exits from last physics node (end),
             //   Reverse exits from first physics node (start).
-            let p0_world = match edge.from_strand {
-                Strand::Forward => layout.end(edge.from),
-                Strand::Reverse => layout.start(edge.from),
+            let (p0_world, p1_world) = if let Some(cache) = cache {
+                cache.edge_endpoints[edge_index]
+            } else {
+                (
+                    match edge.from_strand {
+                        Strand::Forward => layout.end(edge.from),
+                        Strand::Reverse => layout.start(edge.from),
+                    },
+                    match edge.to_strand {
+                        Strand::Forward => layout.start(edge.to),
+                        Strand::Reverse => layout.end(edge.to),
+                    },
+                )
             };
-            let p1_world = match edge.to_strand {
-                Strand::Forward => layout.start(edge.to),
-                Strand::Reverse => layout.end(edge.to),
-            };
+
+            if p0_world[0].max(p1_world[0]) < world_min[0]
+                || p0_world[1].max(p1_world[1]) < world_min[1]
+                || p0_world[0].min(p1_world[0]) > world_max[0]
+                || p0_world[1].min(p1_world[1]) > world_max[1]
+            {
+                continue;
+            }
 
             let p0 = transform(p0_world);
             let p1 = transform(p1_world);
@@ -141,10 +362,31 @@ pub fn draw_graph(
         }
     }
 
+    let overview_indices = cache.and_then(|cache| {
+        let (low, high) = cache.world_bounds;
+        let fit_zoom = (viewport.width() * 0.85 / (high[0] - low[0]).max(1.0))
+            .min(viewport.height() * 0.85 / (high[1] - low[1]).max(1.0));
+        if graph.nodes.len() < 100_000 || lod > fit_zoom * 1.05 {
+            return None;
+        }
+        let mut indices = cache.overview_nodes.clone();
+        indices.extend(selection.nodes.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
+        Some(indices)
+    });
+
     // Merge indistinguishable overview dots into screen cells.
-    let mut occupied_dots = ahash::AHashSet::default();
+    let mut occupied_dots = DotCells::new(viewport);
     // --- Draw nodes as thick polylines through all physics-node chain points ---
-    for (ni, node) in graph.nodes.iter().enumerate() {
+    let node_count = overview_indices
+        .as_ref()
+        .map_or(graph.nodes.len(), Vec::len);
+    for position in 0..node_count {
+        let ni = overview_indices
+            .as_ref()
+            .map_or(position, |nodes| nodes[position]);
+        let node = &graph.nodes[ni];
         if ni >= num_nodes {
             continue;
         }
@@ -154,14 +396,26 @@ pub fn draw_graph(
             continue;
         }
 
-        // Viewport culling: bounding box of all physics points.
-        let mut bmin = [f32::MAX; 2];
-        let mut bmax = [f32::MIN; 2];
-        for &p in pts {
-            bmin[0] = bmin[0].min(p[0]);
-            bmin[1] = bmin[1].min(p[1]);
-            bmax[0] = bmax[0].max(p[0]);
-            bmax[1] = bmax[1].max(p[1]);
+        // Viewport culling: reuse settled-layout bounds while panning or zooming.
+        let (bmin, bmax) = if let Some(cache) = cache {
+            cache.node_bounds[ni]
+        } else {
+            let mut bmin = [f32::MAX; 2];
+            let mut bmax = [f32::MIN; 2];
+            for &p in pts {
+                bmin[0] = bmin[0].min(p[0]);
+                bmin[1] = bmin[1].min(p[1]);
+                bmax[0] = bmax[0].max(p[0]);
+                bmax[1] = bmax[1].max(p[1]);
+            }
+            (bmin, bmax)
+        };
+        if bmax[0] < world_min[0]
+            || bmax[1] < world_min[1]
+            || bmin[0] > world_max[0]
+            || bmin[1] > world_max[1]
+        {
+            continue;
         }
         let screen_min = transform(bmin);
         let screen_max = transform(bmax);
@@ -182,8 +436,7 @@ pub fn draw_graph(
         if pts.len() == 1 || (screen_max.x - screen_min.x).max(screen_max.y - screen_min.y) < 3.0 {
             // Single point or extreme zoom-out: dot.
             let sc = transform(pts[pts.len() / 2]);
-            let cell = ((sc.x / 3.0).floor() as i32, (sc.y / 3.0).floor() as i32);
-            if is_selected || occupied_dots.insert(cell) {
+            if is_selected || occupied_dots.insert(sc) {
                 painter.circle_filled(
                     sc,
                     half_h,
@@ -793,23 +1046,34 @@ mod tests {
     }
 
     fn paint(graph: &ViewGraph, layout: &Layout, zoom: f32) -> egui::FullOutput {
+        paint_with_cache(graph, layout, zoom, None)
+    }
+
+    fn paint_with_cache(
+        graph: &ViewGraph,
+        layout: &Layout,
+        zoom: f32,
+        cache: Option<&RenderCache>,
+    ) -> egui::FullOutput {
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Middle,
                 egui::Id::new("test"),
             ));
-            draw_graph(
-                &painter,
-                Rect::from_min_size(Pos2::ZERO, Vec2::splat(200.0)),
-                graph,
-                layout,
-                &Selection::default(),
-                &RenderParams {
-                    zoom,
-                    ..Default::default()
-                },
-            );
+            let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::splat(200.0));
+            let selection = Selection::default();
+            let params = RenderParams {
+                zoom,
+                ..Default::default()
+            };
+            if let Some(cache) = cache {
+                draw_graph_cached(
+                    &painter, viewport, graph, layout, &selection, &params, cache,
+                );
+            } else {
+                draw_graph(&painter, viewport, graph, layout, &selection, &params);
+            }
         });
 
         // egui 0.36 requires texture deltas (typically the test font atlas)
@@ -836,5 +1100,22 @@ mod tests {
         layout.positions.fill([0.0, 0.0]);
         let output = paint(&graph, &layout, 0.01);
         assert!(output.shapes.len() < 10);
+    }
+
+    #[test]
+    fn cached_canvas_matches_uncached_geometry_at_detail_zoom() {
+        let mut graph = graph(3, 100.0);
+        graph.edges.push(crate::graph::EdgeInfo {
+            from: 0,
+            from_strand: Strand::Forward,
+            to: 1,
+            to_strand: Strand::Forward,
+            kind: EdgeKind::Link,
+        });
+        let layout = Layout::new_with_graph(&graph);
+        let cache = RenderCache::new(&graph, &layout);
+        let uncached = paint(&graph, &layout, 1.0);
+        let cached = paint_with_cache(&graph, &layout, 1.0, Some(&cache));
+        assert_eq!(cached.shapes, uncached.shapes);
     }
 }

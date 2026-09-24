@@ -590,6 +590,10 @@ impl Layout {
         self.node_pts_start.len()
     }
 
+    pub fn revision(&self) -> usize {
+        self.revision
+    }
+
     /// Return the physics point on a visible contig that is closest to the
     /// world-space cursor. Grab mode must use this rather than always taking
     /// the first point of the contig, otherwise every drag is effectively an

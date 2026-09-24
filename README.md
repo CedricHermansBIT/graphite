@@ -10,6 +10,8 @@ Graphite is a fast desktop viewer for large assembly graphs. It is designed arou
 
 Graphite uses its Graphite-specific multilevel Rust implementation as the default initial-layout backend for connected, non-circular components. The bundled Bandage/OGDF FMMM implementation remains available as a reference backend for validation and benchmarking. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
 
+For settled large graphs, panning reuses cached segment bounds and edge geometry. A fitted overview draws representative dots for subpixel groups while retaining long segments and selected nodes; zooming in returns to the individual graph elements. At distant zoom levels, subpixel edges can be skipped without scanning them individually.
+
 ## Highlights
 
 - Memory-mapped, byte-level GFA parsing that does not copy embedded sequences until needed.

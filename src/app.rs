@@ -13,7 +13,9 @@ use crate::gfa::GfaGraph;
 use crate::graph::ViewGraph;
 use crate::history::{History, PendingEdit};
 use crate::layout::{Layout, LayoutBackend, LayoutParams, LayoutRunner};
-use crate::render::{RenderParams, draw_gfa_overlays, draw_graph, hit_test_node};
+use crate::render::{
+    RenderCache, RenderParams, draw_gfa_overlays, draw_graph, draw_graph_cached, hit_test_node,
+};
 use crate::selection::Selection;
 use crate::session::{Preferences, Session};
 use crate::tasks::{LoadJob, LoadRequest, PreparedGraph};
@@ -61,6 +63,7 @@ pub struct GfaApp {
     pending_recent: Option<PathBuf>,
     output_job: Option<std::thread::JoinHandle<anyhow::Result<String>>>,
     last_viewport: Option<Rect>,
+    render_cache: Option<RenderCache>,
     export_width: u32,
     export_height: u32,
     export_current_view: bool,
@@ -124,6 +127,7 @@ impl GfaApp {
             pending_recent: None,
             output_job: None,
             last_viewport: None,
+            render_cache: None,
             export_width: 2400,
             export_height: 1600,
             export_current_view: false,
@@ -207,6 +211,7 @@ impl GfaApp {
         self.previous_load = Some(Box::new(old));
         self.grabbed_phys = None;
         self.grab_world = None;
+        self.render_cache = None;
     }
 
     fn cancel_load(&mut self) {
@@ -808,7 +813,27 @@ impl GfaApp {
         }
     }
 
+    fn refresh_render_cache(&mut self) {
+        match &self.load_state {
+            LoadState::Loaded {
+                view,
+                layout_snapshot,
+                ..
+            } if layout_snapshot.converged && self.grabbed_phys.is_none() => {
+                if self
+                    .render_cache
+                    .as_ref()
+                    .is_none_or(|cache| cache.revision != layout_snapshot.revision())
+                {
+                    self.render_cache = Some(RenderCache::new(view, layout_snapshot));
+                }
+            }
+            _ => self.render_cache = None,
+        }
+    }
+
     fn canvas(&mut self, root_ui: &mut egui::Ui) {
+        self.refresh_render_cache();
         let ctx = root_ui.ctx().clone();
         CentralPanel::default()
             .frame(egui::Frame::new().fill(self.display.theme.canvas_background()))
@@ -1040,6 +1065,7 @@ impl GfaApp {
                         layout_runner.set_attractor(att);
                         if let Some((pos, pi)) = att {
                             Arc::make_mut(layout_snapshot).drag_preview_to(pos, pi);
+                            self.render_cache = None;
                         }
                         if dragging {
                             ctx.request_repaint();
@@ -1067,14 +1093,26 @@ impl GfaApp {
                     painter.rect_filled(viewport, 0.0, self.display.theme.canvas_background());
 
                     let rp = self.render_params();
-                    draw_graph(
-                        &painter,
-                        viewport,
-                        view,
-                        layout_snapshot,
-                        &self.selection,
-                        &rp,
-                    );
+                    if let Some(cache) = &self.render_cache {
+                        draw_graph_cached(
+                            &painter,
+                            viewport,
+                            view,
+                            layout_snapshot,
+                            &self.selection,
+                            &rp,
+                            cache,
+                        );
+                    } else {
+                        draw_graph(
+                            &painter,
+                            viewport,
+                            view,
+                            layout_snapshot,
+                            &self.selection,
+                            &rp,
+                        );
+                    }
 
                     draw_gfa_overlays(
                         &painter,
