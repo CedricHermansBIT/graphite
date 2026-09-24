@@ -419,26 +419,26 @@ fn solar_coarsen(
 
     // OGDF's gcNonUniformProbLowerMass favours low star-mass nodes as suns.
     // We make the selection deterministic by sorting on star mass and a hash.
-    let mut candidates: Vec<usize> = (0..level.node_count).collect();
-    let star_mass: Vec<u64> = (0..level.node_count)
+    let mut candidates: Vec<(u64, u64, usize)> = (0..level.node_count)
         .map(|node| {
             let mut mass = level.hierarchy_mass[node] as u64;
             for index in adjacency.range(node) {
                 mass += level.hierarchy_mass[adjacency.neighbours[index] as usize] as u64;
             }
-            mass
+            (
+                mass,
+                splitmix64(node as u64 ^ salt ^ 0x31D0_8C59_EA22_4A9B),
+                node,
+            )
         })
         .collect();
-    candidates.sort_unstable_by_key(|&node| {
-        (
-            star_mass[node],
-            splitmix64(node as u64 ^ salt ^ 0x31D0_8C59_EA22_4A9B),
-        )
-    });
+    // Cache the hash once per candidate instead of recomputing it at each
+    // comparison in the O(n log n) sort.
+    candidates.sort_unstable_by_key(|&(mass, hash, _)| (mass, hash));
 
     let mut blocked = vec![false; level.node_count];
     let mut suns = Vec::new();
-    for node in candidates {
+    for (_, _, node) in candidates {
         check_cancel(cancel)?;
         if blocked[node] {
             continue;
@@ -709,6 +709,7 @@ fn run_force_iterations(
     let mut repulsion = vec![[0.0f32; 2]; positions.len()];
     let mut movement = vec![[0.0f32; 2]; positions.len()];
     let mut previous_movement = vec![[0.0f32; 2]; positions.len()];
+    let mut tree = BarnesHutTree::default();
 
     for iteration in 0..iterations {
         check_cancel(cancel)?;
@@ -735,8 +736,7 @@ fn run_force_iterations(
             attraction[b][0] -= fx;
             attraction[b][1] -= fy;
         }
-
-        if positions.len() < EXACT_REPULSION_LIMIT {
+        let box_length = if positions.len() < EXACT_REPULSION_LIMIT {
             repulsion
                 .par_iter_mut()
                 .enumerate()
@@ -755,8 +755,9 @@ fn run_force_iterations(
                     }
                     *force = total;
                 });
+            current_box_length(positions)
         } else {
-            let tree = BarnesHutTree::build(positions, cancel)?;
+            tree.rebuild(positions, cancel)?;
             repulsion
                 .par_iter_mut()
                 .enumerate()
@@ -766,7 +767,8 @@ fn run_force_iterations(
                     }
                     *force = tree.repulsion(target, positions, THETA);
                 });
-        }
+            tree.box_length
+        };
 
         let (spring_strength, repulsion_strength, cool_factor) = match phase {
             ForcePhase::Normal => (1.0, 1.0, 1.0),
@@ -782,7 +784,6 @@ fn run_force_iterations(
         };
 
         let scale = average_ideal * average_ideal;
-        let box_length = current_box_length(positions);
         let max_radius = if iteration == 0 {
             box_length / 1000.0
         } else {
@@ -845,17 +846,17 @@ fn prevent_oscillation(new: &mut Pos2, old: Pos2) {
     }
 
     let cos_angle = ((new[0] * old[0] + new[1] * old[1]) / (new_norm * old_norm)).clamp(-1.0, 1.0);
-    let angle = cos_angle.acos();
-
-    let max_factor = if angle <= std::f32::consts::FRAC_PI_6 {
+    // acos is monotone decreasing on [-1, 1], so the angle bands can be
+    // compared directly in cosine space without a transcendental per node.
+    let max_factor = if cos_angle >= 0.866_025_4 {
         2.0
-    } else if angle <= std::f32::consts::FRAC_PI_3 {
+    } else if cos_angle >= 0.5 {
         1.5
-    } else if angle <= std::f32::consts::FRAC_PI_2 {
+    } else if cos_angle >= 0.0 {
         1.0
-    } else if angle <= 2.0 * std::f32::consts::FRAC_PI_3 {
+    } else if cos_angle >= -0.5 {
         2.0 / 3.0
-    } else if angle <= 5.0 * std::f32::consts::FRAC_PI_6 {
+    } else if cos_angle >= -0.866_025_4 {
         0.5
     } else {
         1.0 / 3.0
@@ -1109,12 +1110,14 @@ impl QuadNode {
     }
 }
 
+#[derive(Default)]
 struct BarnesHutTree {
     nodes: Vec<QuadNode>,
+    box_length: f32,
 }
 
 impl BarnesHutTree {
-    fn build(positions: &[Pos2], cancel: &AtomicBool) -> Result<Self, &'static str> {
+    fn rebuild(&mut self, positions: &[Pos2], cancel: &AtomicBool) -> Result<(), &'static str> {
         let mut min = [f32::INFINITY; 2];
         let mut max = [f32::NEG_INFINITY; 2];
         for point in positions {
@@ -1123,26 +1126,98 @@ impl BarnesHutTree {
             max[0] = max[0].max(point[0]);
             max[1] = max[1].max(point[1]);
         }
-        let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
-        let half = ((max[0] - min[0]).max(max[1] - min[1]) * 0.5).max(1.0) * 1.0001;
-
-        let mut tree = Self {
-            nodes: vec![QuadNode::empty(center, half)],
+        let span = (max[0] - min[0]).max(max[1] - min[1]);
+        self.box_length = if span <= 0.0 {
+            positions.len() as f32 * 20.0
+        } else {
+            span * 1.01 + 2.0
         };
+        let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+        let half = (span * 0.5).max(1.0) * 1.0001;
+
+        self.nodes.clear();
+        self.nodes.push(QuadNode::empty(center, half));
+        if positions.len() >= 100_000 && rayon::current_num_threads() > 1 {
+            return self.rebuild_parallel(positions, cancel);
+        }
         for point in 0..positions.len() {
             if point & 1023 == 0 {
                 check_cancel(cancel)?;
             }
-            tree.insert(0, point, positions, 0);
+            Self::insert(&mut self.nodes, 0, point, positions, 0);
         }
-        Ok(tree)
+        Ok(())
     }
 
-    fn insert(&mut self, node_index: usize, point_index: usize, positions: &[Pos2], depth: usize) {
+    fn rebuild_parallel(
+        &mut self,
+        positions: &[Pos2],
+        cancel: &AtomicBool,
+    ) -> Result<(), &'static str> {
+        let mut quadrants: [Vec<usize>; 4] = std::array::from_fn(|_| Vec::new());
+        let root_center = self.nodes[0].center;
+        for (index, &point) in positions.iter().enumerate() {
+            if index & 1023 == 0 {
+                check_cancel(cancel)?;
+            }
+            let root = &mut self.nodes[0];
+            let new_charge = root.charge + 1.0;
+            root.center_of_charge[0] =
+                (root.center_of_charge[0] * root.charge + point[0]) / new_charge;
+            root.center_of_charge[1] =
+                (root.center_of_charge[1] * root.charge + point[1]) / new_charge;
+            root.charge = new_charge;
+            let quadrant = usize::from(point[0] >= root_center[0])
+                + 2 * usize::from(point[1] >= root_center[1]);
+            quadrants[quadrant].push(index);
+        }
+        Self::subdivide(&mut self.nodes, 0);
+        self.nodes[0].point = -2;
+        let child_roots: [QuadNode; 4] = std::array::from_fn(|q| self.nodes[q + 1]);
+        let subtrees = quadrants
+            .into_par_iter()
+            .enumerate()
+            .map(|(quadrant, indices)| {
+                let mut nodes = vec![child_roots[quadrant]];
+                for (ordinal, index) in indices.into_iter().enumerate() {
+                    if ordinal & 1023 == 0 {
+                        check_cancel(cancel)?;
+                    }
+                    Self::insert(&mut nodes, 0, index, positions, 1);
+                }
+                Ok(nodes)
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?;
+
+        for (quadrant, subtree) in subtrees.into_iter().enumerate() {
+            let base = self.nodes.len();
+            for (local, mut node) in subtree.into_iter().enumerate() {
+                for child in &mut node.children {
+                    if *child >= 0 {
+                        *child = (base + *child as usize - 1) as i32;
+                    }
+                }
+                if local == 0 {
+                    self.nodes[quadrant + 1] = node;
+                } else {
+                    self.nodes.push(node);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn insert(
+        nodes: &mut Vec<QuadNode>,
+        node_index: usize,
+        point_index: usize,
+        positions: &[Pos2],
+        depth: usize,
+    ) {
         let point = positions[point_index];
 
         {
-            let node = &mut self.nodes[node_index];
+            let node = &mut nodes[node_index];
             let new_charge = node.charge + 1.0;
             node.center_of_charge[0] =
                 (node.center_of_charge[0] * node.charge + point[0]) / new_charge;
@@ -1151,42 +1226,42 @@ impl BarnesHutTree {
             node.charge = new_charge;
         }
 
-        let is_leaf = self.nodes[node_index].is_leaf();
-        let existing = self.nodes[node_index].point;
+        let is_leaf = nodes[node_index].is_leaf();
+        let existing = nodes[node_index].point;
 
         if is_leaf && existing == -1 {
-            self.nodes[node_index].point = point_index as i32;
+            nodes[node_index].point = point_index as i32;
             return;
         }
 
-        if is_leaf && (depth >= 28 || self.nodes[node_index].half <= EPSILON) {
-            self.nodes[node_index].point = -2;
+        if is_leaf && (depth >= 28 || nodes[node_index].half <= EPSILON) {
+            nodes[node_index].point = -2;
             return;
         }
 
         if is_leaf {
-            self.subdivide(node_index);
-            self.nodes[node_index].point = -2;
+            Self::subdivide(nodes, node_index);
+            nodes[node_index].point = -2;
             if existing >= 0 {
                 let old = existing as usize;
-                let child = self.child_index(node_index, positions[old]);
-                self.insert(child, old, positions, depth + 1);
+                let child = Self::child_index(nodes, node_index, positions[old]);
+                Self::insert(nodes, child, old, positions, depth + 1);
             }
         }
 
-        let child = self.child_index(node_index, point);
-        self.insert(child, point_index, positions, depth + 1);
+        let child = Self::child_index(nodes, node_index, point);
+        Self::insert(nodes, child, point_index, positions, depth + 1);
     }
 
-    fn subdivide(&mut self, node_index: usize) {
-        let node = self.nodes[node_index];
+    fn subdivide(nodes: &mut Vec<QuadNode>, node_index: usize) {
+        let node = nodes[node_index];
         let child_half = node.half * 0.5;
-        let first = self.nodes.len();
+        let first = nodes.len();
 
         for quadrant in 0..4 {
             let x = if quadrant & 1 == 0 { -1.0 } else { 1.0 };
             let y = if quadrant & 2 == 0 { -1.0 } else { 1.0 };
-            self.nodes.push(QuadNode::empty(
+            nodes.push(QuadNode::empty(
                 [
                     node.center[0] + x * child_half,
                     node.center[1] + y * child_half,
@@ -1195,7 +1270,7 @@ impl BarnesHutTree {
             ));
         }
 
-        self.nodes[node_index].children = [
+        nodes[node_index].children = [
             first as i32,
             (first + 1) as i32,
             (first + 2) as i32,
@@ -1203,8 +1278,8 @@ impl BarnesHutTree {
         ];
     }
 
-    fn child_index(&self, node_index: usize, point: Pos2) -> usize {
-        let node = self.nodes[node_index];
+    fn child_index(nodes: &[QuadNode], node_index: usize, point: Pos2) -> usize {
+        let node = nodes[node_index];
         let x = usize::from(point[0] >= node.center[0]);
         let y = usize::from(point[1] >= node.center[1]) * 2;
         node.children[x + y] as usize
@@ -1446,5 +1521,35 @@ mod tests {
         let force = repulsive_force([10.0, 0.0], [0.0, 0.0], 1.0);
         assert!(force[0] > 0.0);
         assert!(force[1].abs() < EPSILON);
+    }
+
+    #[test]
+    fn parallel_tree_matches_serial_repulsion() {
+        let positions = deterministic_random_seed(100_001, 100.0, 123);
+        let cancel = AtomicBool::new(false);
+        let serial_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let parallel_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let serial = serial_pool.install(|| {
+            let mut tree = BarnesHutTree::default();
+            tree.rebuild(&positions, &cancel).unwrap();
+            tree
+        });
+        let parallel = parallel_pool.install(|| {
+            let mut tree = BarnesHutTree::default();
+            tree.rebuild(&positions, &cancel).unwrap();
+            tree
+        });
+        for target in (0..positions.len()).step_by(1000) {
+            assert_eq!(
+                serial.repulsion(target, &positions, THETA),
+                parallel.repulsion(target, &positions, THETA)
+            );
+        }
     }
 }
