@@ -6,6 +6,7 @@
 //!  - zoom > 1.0: full detail with labels.
 
 use egui::{Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
+use std::borrow::Cow;
 
 use crate::filter::ColorMode;
 use crate::gfa::{GfaGraph, PathConnection, Strand};
@@ -23,6 +24,8 @@ pub struct RenderCache {
     edge_endpoints: Vec<([f32; 2], [f32; 2])>,
     /// Longest edges first, so subpixel edges can be skipped without scanning.
     edges_by_span: Vec<(f32, usize)>,
+    /// Spatial representatives for the fitted overview, in painter order.
+    overview_edges: Vec<usize>,
 }
 
 impl RenderCache {
@@ -100,6 +103,7 @@ impl RenderCache {
             })
             .collect::<Vec<_>>();
         edges_by_span.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        let overview_edges = overview_edge_representatives(&edge_endpoints, world_low, world_high);
         Self {
             revision: layout.revision(),
             node_bounds,
@@ -107,8 +111,55 @@ impl RenderCache {
             overview_nodes,
             edge_endpoints,
             edges_by_span,
+            overview_edges,
         }
     }
+}
+
+fn overview_edge_representatives(
+    endpoints: &[([f32; 2], [f32; 2])],
+    world_low: [f32; 2],
+    world_high: [f32; 2],
+) -> Vec<usize> {
+    // A compact layout can make tens of thousands of links exceed one screen
+    // pixel at fit zoom. Retain the longest link in each roughly 2.5-pixel
+    // cell and direction for a 1280x720 viewport.
+    const GRID_WIDTH: usize = 512;
+    const GRID_HEIGHT: usize = 288;
+    const DIRECTIONS: usize = 4;
+    let cell_w = (world_high[0] - world_low[0]).max(1.0) / GRID_WIDTH as f32;
+    let cell_h = (world_high[1] - world_low[1]).max(1.0) / GRID_HEIGHT as f32;
+    let mut slots = vec![(f32::NEG_INFINITY, usize::MAX); GRID_WIDTH * GRID_HEIGHT * DIRECTIONS];
+    for (index, &(from, to)) in endpoints.iter().enumerate() {
+        let dx = to[0] - from[0];
+        let dy = to[1] - from[1];
+        let span_sq = dx * dx + dy * dy;
+        if !span_sq.is_finite() {
+            continue;
+        }
+        let middle = [from[0] + dx * 0.5, from[1] + dy * 0.5];
+        let x = ((middle[0] - world_low[0]) / cell_w) as usize;
+        let y = ((middle[1] - world_low[1]) / cell_h) as usize;
+        let direction = usize::from(dx.abs() < dy.abs()) * 2 + usize::from(dx * dy < 0.0);
+        let cell =
+            (y.min(GRID_HEIGHT - 1) * GRID_WIDTH + x.min(GRID_WIDTH - 1)) * DIRECTIONS + direction;
+        if span_sq > slots[cell].0 {
+            slots[cell] = (span_sq, index);
+        }
+    }
+    let mut selected = slots
+        .into_iter()
+        .filter_map(|(_, index)| (index != usize::MAX).then_some(index))
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    selected
+}
+
+fn is_fitted_overview(cache: &RenderCache, viewport: Rect, zoom: f32, node_count: usize) -> bool {
+    let (low, high) = cache.world_bounds;
+    let fit_zoom = (viewport.width() * 0.85 / (high[0] - low[0]).max(1.0))
+        .min(viewport.height() * 0.85 / (high[1] - low[1]).max(1.0));
+    node_count >= 100_000 && zoom <= fit_zoom * 1.05
 }
 
 /// A screen-sized occupancy map avoids a million hash probes at overview zoom.
@@ -278,7 +329,28 @@ fn draw_graph_inner(
     if lod > params.edge_visible_min_zoom {
         // This is the same one-pixel test used below, evaluated against cached
         // world-space spans. Keep a small margin for floating-point rounding.
+        let overview_edges = cache
+            .filter(|cache| is_fitted_overview(cache, viewport, lod, graph.nodes.len()))
+            .map(|cache| {
+                if selection.edges.is_empty() {
+                    Cow::Borrowed(cache.overview_edges.as_slice())
+                } else {
+                    // Selected links stay visible even if another link
+                    // represents their overview cell.
+                    let mut indices = cache.overview_edges.clone();
+                    indices.extend(graph.edges.iter().enumerate().filter_map(|(index, edge)| {
+                        selection
+                            .edges
+                            .contains(&(edge.from, edge.to))
+                            .then_some(index)
+                    }));
+                    indices.sort_unstable();
+                    indices.dedup();
+                    Cow::Owned(indices)
+                }
+            });
         let long_edges = cache
+            .filter(|_| overview_edges.is_none())
             .filter(|_| selection.edges.is_empty())
             .and_then(|cache| {
                 let cutoff_sq = 0.9 / (lod * lod);
@@ -296,11 +368,19 @@ fn draw_graph_inner(
                 indices.sort_unstable();
                 Some(indices)
             });
-        let edge_count = long_edges.as_ref().map_or(graph.edges.len(), Vec::len);
+        let edge_count = overview_edges.as_ref().map_or_else(
+            || long_edges.as_ref().map_or(graph.edges.len(), Vec::len),
+            |edges| edges.len(),
+        );
         for position in 0..edge_count {
-            let edge_index = long_edges
-                .as_ref()
-                .map_or(position, |edges| edges[position]);
+            let edge_index = overview_edges.as_ref().map_or_else(
+                || {
+                    long_edges
+                        .as_ref()
+                        .map_or(position, |edges| edges[position])
+                },
+                |edges| edges[position],
+            );
             let edge = &graph.edges[edge_index];
             if edge.from >= num_nodes || edge.to >= num_nodes {
                 continue;
@@ -363,10 +443,7 @@ fn draw_graph_inner(
     }
 
     let overview_indices = cache.and_then(|cache| {
-        let (low, high) = cache.world_bounds;
-        let fit_zoom = (viewport.width() * 0.85 / (high[0] - low[0]).max(1.0))
-            .min(viewport.height() * 0.85 / (high[1] - low[1]).max(1.0));
-        if graph.nodes.len() < 100_000 || lod > fit_zoom * 1.05 {
+        if !is_fitted_overview(cache, viewport, lod, graph.nodes.len()) {
             return None;
         }
         let mut indices = cache.overview_nodes.clone();
@@ -1100,6 +1177,20 @@ mod tests {
         layout.positions.fill([0.0, 0.0]);
         let output = paint(&graph, &layout, 0.01);
         assert!(output.shapes.len() < 10);
+    }
+
+    #[test]
+    fn overview_edges_keep_longest_and_spatially_distinct_links() {
+        let endpoints = [
+            ([45.0, 50.0], [55.0, 50.0]),
+            ([40.0, 50.0], [60.0, 50.0]),
+            ([45.0, 60.0], [55.0, 60.0]),
+            ([50.0, 45.0], [50.0, 55.0]),
+        ];
+        assert_eq!(
+            overview_edge_representatives(&endpoints, [0.0, 0.0], [100.0, 100.0]),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]
