@@ -2184,16 +2184,6 @@ pub struct LayoutRunner {
 }
 
 impl LayoutRunner {
-    pub fn start_with_backend(
-        graph: Arc<ViewGraph>,
-        params: LayoutParams,
-        backend: LayoutBackend,
-        publish_interval: std::time::Duration,
-    ) -> Self {
-        let layout = Layout::new_with_graph_backend(&graph, backend);
-        Self::from_layout(graph, params, layout, publish_interval)
-    }
-
     pub fn from_layout(
         graph: Arc<ViewGraph>,
         params: LayoutParams,
@@ -2266,10 +2256,6 @@ impl LayoutRunner {
 
     pub fn is_running(&self) -> bool {
         self.running.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub fn snapshot(&self) -> Option<Layout> {
-        self.layout.lock().ok().map(|layout| layout.clone())
     }
 
     pub fn snapshot_changed(&self, target: &Layout) -> bool {

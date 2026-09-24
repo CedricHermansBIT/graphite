@@ -191,21 +191,6 @@ pub fn export_svg(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn export_svg_with_overlays(
-    path: &Path,
-    gfa: &GfaGraph,
-    graph: &ViewGraph,
-    layout: &Layout,
-    params: &RenderParams,
-    selected_path: Option<usize>,
-    selected_walk: Option<usize>,
-    show_containments: bool,
-) -> Result<()> {
-    export_svg_with_options(path, gfa, graph, layout, params, selected_path,
-        selected_walk, show_containments, &FigureOptions::default())
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn export_svg_with_options(
     path: &Path,
     gfa: &GfaGraph,
@@ -377,21 +362,6 @@ pub fn export_png(
 }
 
 /// Export the current interactive view, including active GFA metadata overlays.
-#[allow(clippy::too_many_arguments)]
-pub fn export_png_with_overlays(
-    path: &Path,
-    gfa: &GfaGraph,
-    graph: &ViewGraph,
-    layout: &Layout,
-    params: &RenderParams,
-    selected_path: Option<usize>,
-    selected_walk: Option<usize>,
-    show_containments: bool,
-) -> Result<()> {
-    export_png_with_options(path, gfa, graph, layout, params, selected_path,
-        selected_walk, show_containments, &FigureOptions::default())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn export_png_with_options(
     path: &Path,

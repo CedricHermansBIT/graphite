@@ -1,5 +1,7 @@
 //! UI panels rendered each frame by egui.
 
+use serde::{Deserialize, Serialize};
+
 use egui::{Color32, Grid, RichText, ScrollArea, Ui};
 
 use crate::export::AssemblyStats;
@@ -32,7 +34,12 @@ fn section<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner_margin(egui::Margin::same(11))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title.to_uppercase()).small().strong().color(accent));
+            ui.label(
+                RichText::new(title.to_uppercase())
+                    .small()
+                    .strong()
+                    .color(accent),
+            );
             ui.add_space(3.0);
             add(ui)
         })
@@ -47,7 +54,7 @@ fn hint(ui: &mut Ui, text: &str) {
     );
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemePreset {
     Graphite,
     Midnight,
@@ -88,7 +95,11 @@ impl ThemePreset {
 pub fn filter_panel(ui: &mut Ui, filter: &mut FilterParams) -> bool {
     let mut changed = false;
 
-    panel_header(ui, "Filters", "Choose which segments and components are shown.");
+    panel_header(
+        ui,
+        "Filters",
+        "Choose which segments and components are shown.",
+    );
 
     section(ui, "Segments", |ui| {
         ui.label("Name contains");
@@ -193,13 +204,17 @@ pub fn filter_panel(ui: &mut Ui, filter: &mut FilterParams) -> bool {
             .selected_text(filter.component_topology.label())
             .show_ui(ui, |ui| {
                 for topology in [
-                ComponentTopology::All,
-                ComponentTopology::Circular,
-                ComponentTopology::Linear,
-                ComponentTopology::Branched,
+                    ComponentTopology::All,
+                    ComponentTopology::Circular,
+                    ComponentTopology::Linear,
+                    ComponentTopology::Branched,
                 ] {
                     changed |= ui
-                        .selectable_value(&mut filter.component_topology, topology, topology.label())
+                        .selectable_value(
+                            &mut filter.component_topology,
+                            topology,
+                            topology.label(),
+                        )
                         .changed();
                 }
             });
@@ -297,7 +312,10 @@ pub fn filter_panel(ui: &mut Ui, filter: &mut FilterParams) -> bool {
 
     ui.add_space(8.0);
     if ui
-        .add_sized([ui.available_width(), 30.0], egui::Button::new("Reset filters"))
+        .add_sized(
+            [ui.available_width(), 30.0],
+            egui::Button::new("Reset filters"),
+        )
         .clicked()
     {
         *filter = FilterParams::default();
@@ -309,6 +327,8 @@ pub fn filter_panel(ui: &mut Ui, filter: &mut FilterParams) -> bool {
 
 // ── Display Panel ─────────────────────────────────────────────────────────────
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplayOptions {
     pub theme: ThemePreset,
     pub color_mode: ColorMode,
@@ -364,16 +384,12 @@ pub fn display_panel(ui: &mut Ui, opts: &mut DisplayOptions) -> bool {
             ui.add_enabled_ui(!opts.auto_color_scale, |ui| {
                 ui.label("Minimum");
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut opts.min_depth_color, 0.0..=500.0)
-                            .show_value(true),
-                    )
+                    .add(egui::Slider::new(&mut opts.min_depth_color, 0.0..=500.0).show_value(true))
                     .changed();
                 ui.label("Maximum");
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut opts.max_depth_color, 1.0..=1000.0)
-                            .show_value(true),
+                        egui::Slider::new(&mut opts.max_depth_color, 1.0..=1000.0).show_value(true),
                     )
                     .changed();
             });
@@ -384,7 +400,9 @@ pub fn display_panel(ui: &mut Ui, opts: &mut DisplayOptions) -> bool {
 
     ui.add_space(8.0);
     section(ui, "Graph", |ui| {
-        changed |= ui.checkbox(&mut opts.show_labels, "Show segment labels").changed();
+        changed |= ui
+            .checkbox(&mut opts.show_labels, "Show segment labels")
+            .changed();
         ui.label("Segment thickness");
         changed |= ui
             .add(egui::Slider::new(&mut opts.node_scale, 0.2..=5.0))
@@ -408,7 +426,8 @@ pub enum OverlayAction {
     SelectWalk(usize),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OverlayOptions {
     pub selected_path: Option<usize>,
     pub selected_walk: Option<usize>,
@@ -448,31 +467,30 @@ pub fn overlays_panel(
 
     if !gfa.paths.is_empty() {
         section(ui, "Path overlay", |ui| {
-            if let Some(index) = opts.selected_path {
-                if let Some(path) = gfa.paths.get(index) {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(path.name.as_ref()).strong());
-                        if ui.small_button("Clear").clicked() {
-                            opts.selected_path = None;
-                            changed = true;
-                        }
-                    });
-                    hint(ui, &format!("{} oriented steps", path.steps.len()));
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Focus").clicked() {
-                            action = Some(OverlayAction::FocusPath(index));
-                        }
-                        if ui.small_button("Select segments").clicked() {
-                            action = Some(OverlayAction::SelectPath(index));
-                        }
-                    });
-                    ui.add_space(5.0);
-                }
+            if let Some(index) = opts.selected_path
+                && let Some(path) = gfa.paths.get(index)
+            {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(path.name.as_ref()).strong());
+                    if ui.small_button("Clear").clicked() {
+                        opts.selected_path = None;
+                        changed = true;
+                    }
+                });
+                hint(ui, &format!("{} oriented steps", path.steps.len()));
+                ui.horizontal(|ui| {
+                    if ui.small_button("Focus").clicked() {
+                        action = Some(OverlayAction::FocusPath(index));
+                    }
+                    if ui.small_button("Select segments").clicked() {
+                        action = Some(OverlayAction::SelectPath(index));
+                    }
+                });
+                ui.add_space(5.0);
             }
 
             ui.add(
-                egui::TextEdit::singleline(&mut opts.path_query)
-                    .hint_text("Filter path names…"),
+                egui::TextEdit::singleline(&mut opts.path_query).hint_text("Filter path names…"),
             );
             let query = opts.path_query.trim().to_ascii_lowercase();
             let matches: Vec<_> = gfa
@@ -499,33 +517,36 @@ pub fn overlays_panel(
                     }
                 }
             });
-            hint(ui, "Showing up to 20 matches. Type part of a name to narrow the list.");
+            hint(
+                ui,
+                "Showing up to 20 matches. Type part of a name to narrow the list.",
+            );
         });
         ui.add_space(8.0);
     }
 
     if !gfa.walks.is_empty() {
         section(ui, "Walk overlay", |ui| {
-            if let Some(index) = opts.selected_walk {
-                if let Some(walk) = gfa.walks.get(index) {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(walk_label(walk)).strong());
-                        if ui.small_button("Clear").clicked() {
-                            opts.selected_walk = None;
-                            changed = true;
-                        }
-                    });
-                    hint(ui, &format!("{} oriented steps", walk.steps.len()));
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Focus").clicked() {
-                            action = Some(OverlayAction::FocusWalk(index));
-                        }
-                        if ui.small_button("Select segments").clicked() {
-                            action = Some(OverlayAction::SelectWalk(index));
-                        }
-                    });
-                    ui.add_space(5.0);
-                }
+            if let Some(index) = opts.selected_walk
+                && let Some(walk) = gfa.walks.get(index)
+            {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(walk_label(walk)).strong());
+                    if ui.small_button("Clear").clicked() {
+                        opts.selected_walk = None;
+                        changed = true;
+                    }
+                });
+                hint(ui, &format!("{} oriented steps", walk.steps.len()));
+                ui.horizontal(|ui| {
+                    if ui.small_button("Focus").clicked() {
+                        action = Some(OverlayAction::FocusWalk(index));
+                    }
+                    if ui.small_button("Select segments").clicked() {
+                        action = Some(OverlayAction::SelectWalk(index));
+                    }
+                });
+                ui.add_space(5.0);
             }
 
             ui.add(
@@ -541,8 +562,15 @@ pub fn overlays_panel(
                     if query.is_empty() {
                         true
                     } else {
-                        walk.sample_id.as_ref().to_ascii_lowercase().contains(&query)
-                            || walk.sequence_id.as_ref().to_ascii_lowercase().contains(&query)
+                        walk.sample_id
+                            .as_ref()
+                            .to_ascii_lowercase()
+                            .contains(&query)
+                            || walk
+                                .sequence_id
+                                .as_ref()
+                                .to_ascii_lowercase()
+                                .contains(&query)
                             || walk.haplotype_index.to_string().contains(&query)
                     }
                 })
@@ -563,7 +591,10 @@ pub fn overlays_panel(
                     }
                 }
             });
-            hint(ui, "Showing up to 20 matches. Search by sample, haplotype or sequence.");
+            hint(
+                ui,
+                "Showing up to 20 matches. Search by sample, haplotype or sequence.",
+            );
         });
     }
 
@@ -649,16 +680,19 @@ pub fn component_table(
             ui.label("Find");
             if ui
                 .add(
-                egui::TextEdit::singleline(query)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Circular, linear, branched, or #…"),
+                    egui::TextEdit::singleline(query)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Circular, linear, branched, or #…"),
                 )
                 .changed()
             {
                 *page = 0;
             }
         });
-        hint(ui, "Click a row to focus it. Use Top N to reduce the graph.");
+        hint(
+            ui,
+            "Click a row to focus it. Use Top N to reduce the graph.",
+        );
         ui.add_space(4.0);
         const PAGE_SIZE: usize = 12;
         let query = query.trim().to_ascii_lowercase();
@@ -699,8 +733,16 @@ pub fn component_table(
                         focus = Some(component.nodes.clone());
                     }
                     ui.label(RichText::new(component.kind.label()).small());
-                    ui.label(RichText::new(format_count(component.nodes.len())).small().monospace());
-                    ui.label(RichText::new(format_bp(component.total_length)).small().monospace());
+                    ui.label(
+                        RichText::new(format_count(component.nodes.len()))
+                            .small()
+                            .monospace(),
+                    );
+                    ui.label(
+                        RichText::new(format_bp(component.total_length))
+                            .small()
+                            .monospace(),
+                    );
                     ui.label(
                         RichText::new(
                             component
@@ -726,7 +768,10 @@ pub fn component_table(
             });
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(*page > 0, egui::Button::new("Previous")).clicked() {
+            if ui
+                .add_enabled(*page > 0, egui::Button::new("Previous"))
+                .clicked()
+            {
                 *page -= 1;
             }
             ui.label(RichText::new(format!("Page {} / {}", *page + 1, page_count)).small());
@@ -793,7 +838,11 @@ pub fn selection_panel(
             .spacing([16.0, 7.0])
             .show(ui, |ui| {
                 ui.label(RichText::new("Segments").color(ui.visuals().weak_text_color()));
-                ui.label(RichText::new(format_count(selection.node_count())).monospace().strong());
+                ui.label(
+                    RichText::new(format_count(selection.node_count()))
+                        .monospace()
+                        .strong(),
+                );
                 ui.end_row();
                 ui.label(RichText::new("Total length").color(ui.visuals().weak_text_color()));
                 ui.label(RichText::new(format_bp(total_len)).monospace().strong());
@@ -806,10 +855,10 @@ pub fn selection_panel(
     for &ni in selection.nodes.iter() {
         if ni < graph.nodes.len() {
             let seg_idx = graph.nodes[ni].seg_idx;
-            if seg_idx < gfa.segments.len() {
-                if let Some(d) = gfa.segments[seg_idx].depth {
-                    depths.push(d);
-                }
+            if seg_idx < gfa.segments.len()
+                && let Some(d) = gfa.segments[seg_idx].depth
+            {
+                depths.push(d);
             }
         }
     }
@@ -837,14 +886,18 @@ pub fn selection_panel(
     }
 
     // Show details for single-node selection.
-    if selection.node_count() == 1 {
-        if let Some(&ni) = selection.nodes.iter().next() {
-            if ni < graph.nodes.len() {
-                let node = &graph.nodes[ni];
-                let seg = &gfa.segments[node.seg_idx];
-                ui.add_space(8.0);
-                section(ui, "Segment details", |ui| {
-                Grid::new("sel_grid").num_columns(2).spacing([14.0, 7.0]).show(ui, |ui| {
+    if selection.node_count() == 1
+        && let Some(&ni) = selection.nodes.iter().next()
+        && ni < graph.nodes.len()
+    {
+        let node = &graph.nodes[ni];
+        let seg = &gfa.segments[node.seg_idx];
+        ui.add_space(8.0);
+        section(ui, "Segment details", |ui| {
+            Grid::new("sel_grid")
+                .num_columns(2)
+                .spacing([14.0, 7.0])
+                .show(ui, |ui| {
                     ui.label("Name:");
                     ui.label(RichText::new(node.name.as_ref()).monospace().strong());
                     ui.end_row();
@@ -863,19 +916,17 @@ pub fn selection_panel(
                     }
                 });
 
-                // Sequence preview.
-                let seq = seg.sequence(&gfa.mmap);
-                if !seq.is_empty() {
-                    ui.add_space(7.0);
-                    hint(ui, "Sequence preview · first 80 bp");
-                    let preview = String::from_utf8_lossy(&seq[..seq.len().min(80)]);
-                    ScrollArea::horizontal().show(ui, |ui| {
-                        ui.label(RichText::new(preview.as_ref()).monospace().small());
-                    });
-                }
+            // Sequence preview.
+            let seq = seg.sequence(&gfa.mmap);
+            if !seq.is_empty() {
+                ui.add_space(7.0);
+                hint(ui, "Sequence preview · first 80 bp");
+                let preview = String::from_utf8_lossy(&seq[..seq.len().min(80)]);
+                ScrollArea::horizontal().show(ui, |ui| {
+                    ui.label(RichText::new(preview.as_ref()).monospace().small());
                 });
             }
-        }
+        });
     }
 
     ui.add_space(8.0);
@@ -887,9 +938,7 @@ pub fn selection_panel(
     };
     if !has_selected_sequence {
         section(ui, "Sequence unavailable", |ui| {
-            ui.label(
-                RichText::new(unavailable_reason).color(ui.visuals().weak_text_color()),
-            );
+            ui.label(RichText::new(unavailable_reason).color(ui.visuals().weak_text_color()));
         });
         ui.add_space(8.0);
     } else if selected_sequence_count < selection.node_count() {
@@ -910,9 +959,7 @@ pub fn selection_panel(
             egui::Button::new("Copy sequence").min_size(egui::vec2(ui.available_width(), 30.0)),
         )
         .on_disabled_hover_text(unavailable_reason);
-    if copy_response
-        .clicked()
-    {
+    if copy_response.clicked() {
         *on_copy_seq = true;
     }
     let export_response = ui
@@ -921,13 +968,14 @@ pub fn selection_panel(
             egui::Button::new("Export FASTA…").min_size(egui::vec2(ui.available_width(), 30.0)),
         )
         .on_disabled_hover_text(unavailable_reason);
-    if export_response
-        .clicked()
-    {
+    if export_response.clicked() {
         *on_export_fasta = true;
     }
     if ui
-        .add_sized([ui.available_width(), 30.0], egui::Button::new("Select entire component"))
+        .add_sized(
+            [ui.available_width(), 30.0],
+            egui::Button::new("Select entire component"),
+        )
         .clicked()
     {
         *on_select_component = true;
@@ -939,7 +987,7 @@ pub fn selection_panel(
 pub fn draw_legend(ui: &mut Ui, opts: &DisplayOptions) {
     match opts.color_mode {
         ColorMode::Depth => {
-            color_ramp(ui, |t| crate::render::depth_color_for_legend(t));
+            color_ramp(ui, crate::render::depth_color_for_legend);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("{:.0}×", opts.min_depth_color))
@@ -961,14 +1009,18 @@ pub fn draw_legend(ui: &mut Ui, opts: &DisplayOptions) {
             });
             ui.horizontal(|ui| {
                 hint(ui, "Short");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| hint(ui, "Long"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    hint(ui, "Long")
+                });
             });
         }
         ColorMode::ReadCount => {
-            color_ramp(ui, |t| crate::render::depth_color_for_legend(t));
+            color_ramp(ui, crate::render::depth_color_for_legend);
             ui.horizontal(|ui| {
                 hint(ui, "Fewer reads");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| hint(ui, "More reads"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    hint(ui, "More reads")
+                });
             });
         }
         ColorMode::Uniform => hint(ui, "All segments use the same color."),
@@ -994,7 +1046,7 @@ fn format_count(value: usize) -> String {
     let digits = value.to_string();
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             formatted.push(',');
         }
         formatted.push(ch);

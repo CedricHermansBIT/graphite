@@ -1,15 +1,18 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+mod export;
+mod filter;
 mod gfa;
 mod graph;
+mod history;
 mod layout;
 mod render;
 mod rust_layout;
-mod ui;
-mod filter;
 mod selection;
-mod export;
+mod session;
+mod tasks;
+mod ui;
 
 use anyhow::{Context, Result};
 use argh::FromArgs;
@@ -18,6 +21,10 @@ use std::time::Instant;
 #[derive(FromArgs)]
 /// Graphite - optimized for large assembly graphs
 struct Args {
+    /// print Graphite version and exit
+    #[argh(switch)]
+    version: bool,
+
     /// run a headless benchmark and print one JSON record to stdout
     #[argh(switch)]
     benchmark: bool,
@@ -67,7 +74,12 @@ fn parse_layout_backend(value: &str) -> Result<layout::LayoutBackend> {
     anyhow::bail!("unknown layout backend '{value}'; expected 'rust'");
 }
 
-fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout::LayoutBackend) -> Result<()> {
+fn run_benchmark(
+    path: &str,
+    steps: usize,
+    output: Option<&str>,
+    backend: layout::LayoutBackend,
+) -> Result<()> {
     let total_start = Instant::now();
     let file_bytes = std::fs::metadata(path)
         .with_context(|| format!("Cannot stat {path}"))?
@@ -95,6 +107,7 @@ fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout
     let export_ms = if let Some(output) = output {
         let start = Instant::now();
         let output_path = std::path::Path::new(output);
+        session::ensure_distinct_output(output_path, std::path::Path::new(path))?;
         let extension = output_path
             .extension()
             .and_then(|value| value.to_str())
@@ -156,6 +169,7 @@ fn run_benchmark(path: &str, steps: usize, output: Option<&str>, backend: layout
         "gfa_paths": gfa.paths.len(),
         "gfa_walks": gfa.walks.len(),
         "gfa_tags": gfa.tags.len(),
+        "parse_warnings": gfa.diagnostics.len(),
         "components": view.components.len(),
         "circular_components": circular_components,
         "linear_components": linear_components,
@@ -185,6 +199,10 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Args = argh::from_env();
+    if args.version {
+        println!("Graphite {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     if args.benchmark {
         let file = args
@@ -218,12 +236,10 @@ fn main() -> Result<()> {
         "Graphite",
         native_options,
         Box::new(move |cc| {
-            Ok(Box::new(app::GfaApp::new(
-                cc,
-                args.file,
-                backend,
-                args.remote_ui,
-            )) as Box<dyn eframe::App>)
+            Ok(
+                Box::new(app::GfaApp::new(cc, args.file, backend, args.remote_ui))
+                    as Box<dyn eframe::App>,
+            )
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {e}"))

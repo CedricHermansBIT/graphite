@@ -264,7 +264,7 @@ pub fn draw_graph(
                     painter.text(
                         mid,
                         egui::Align2::CENTER_CENTER,
-                        &format_bp(node.length),
+                        format_bp(node.length),
                         FontId::monospace(7.0),
                         params.canvas_foreground,
                     );
@@ -280,6 +280,7 @@ pub fn draw_graph(
 /// attach to the corresponding fractional position along the drawn container
 /// polyline. Filtered-out segments are skipped rather than forcing them back
 /// into the current view.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_gfa_overlays(
     painter: &Painter,
     viewport: Rect,
@@ -314,8 +315,7 @@ pub fn draw_gfa_overlays(
                 .map_or(1, |segment| segment.length.max(1));
             // GFA1 defines C.Pos on the container in its forward
             // sequence orientation, before ContainerOrient is applied.
-            let fraction =
-                (containment.position as f32 / container_len as f32).clamp(0.0, 1.0);
+            let fraction = (containment.position as f32 / container_len as f32).clamp(0.0, 1.0);
 
             let source = world_to_screen(
                 layout.point_at_fraction(container_node, fraction),
@@ -336,93 +336,82 @@ pub fn draw_gfa_overlays(
         }
     }
 
-    if let Some(path_index) = selected_path {
-        if let Some(path) = gfa.paths.get(path_index) {
-            let steps = gfa.path_steps(path);
-            draw_path_like_overlay(
-                painter,
-                viewport,
-                graph,
-                layout,
-                params,
-                steps.iter().map(|step| (step.segment, step.strand)),
-                path_color,
-                5.0,
-            );
+    if let Some(path_index) = selected_path
+        && let Some(path) = gfa.paths.get(path_index)
+    {
+        let steps = gfa.path_steps(path);
+        draw_path_like_overlay(
+            painter,
+            viewport,
+            graph,
+            layout,
+            params,
+            steps.iter().map(|step| (step.segment, step.strand)),
+            path_color,
+            5.0,
+        );
 
-            for pair_index in 0..steps.len().saturating_sub(1) {
-                let from = steps[pair_index];
-                let to = steps[pair_index + 1];
-                let (Some(&from_node), Some(&to_node)) = (
-                    graph.seg_to_node.get(&from.segment),
-                    graph.seg_to_node.get(&to.segment),
-                ) else {
-                    continue;
-                };
-                if from_node >= layout.num_nodes() || to_node >= layout.num_nodes() {
-                    continue;
-                }
-                let a = world_to_screen(
-                    oriented_exit(layout, from_node, from.strand),
-                    viewport,
-                    params,
-                );
-                let b = world_to_screen(
-                    oriented_entry(layout, to_node, to.strand),
-                    viewport,
-                    params,
-                );
-                let stroke = Stroke::new(3.0, path_color.gamma_multiply(0.9));
-                if matches!(from.connection_to_next, Some(PathConnection::Jump)) {
-                    draw_dashed_segment(painter, a, b, stroke);
-                } else {
-                    painter.line_segment([a, b], stroke);
-                }
+        for pair_index in 0..steps.len().saturating_sub(1) {
+            let from = steps[pair_index];
+            let to = steps[pair_index + 1];
+            let (Some(&from_node), Some(&to_node)) = (
+                graph.seg_to_node.get(&from.segment),
+                graph.seg_to_node.get(&to.segment),
+            ) else {
+                continue;
+            };
+            if from_node >= layout.num_nodes() || to_node >= layout.num_nodes() {
+                continue;
+            }
+            let a = world_to_screen(
+                oriented_exit(layout, from_node, from.strand),
+                viewport,
+                params,
+            );
+            let b = world_to_screen(oriented_entry(layout, to_node, to.strand), viewport, params);
+            let stroke = Stroke::new(3.0, path_color.gamma_multiply(0.9));
+            if matches!(from.connection_to_next, Some(PathConnection::Jump)) {
+                draw_dashed_segment(painter, a, b, stroke);
+            } else {
+                painter.line_segment([a, b], stroke);
             }
         }
     }
 
-    if let Some(walk_index) = selected_walk {
-        if let Some(walk) = gfa.walks.get(walk_index) {
-            let steps = gfa.walk_steps(walk);
-            draw_path_like_overlay(
-                painter,
-                viewport,
-                graph,
-                layout,
-                params,
-                steps.iter().map(|step| (step.segment, step.strand)),
-                walk_color,
-                4.0,
-            );
+    if let Some(walk_index) = selected_walk
+        && let Some(walk) = gfa.walks.get(walk_index)
+    {
+        let steps = gfa.walk_steps(walk);
+        draw_path_like_overlay(
+            painter,
+            viewport,
+            graph,
+            layout,
+            params,
+            steps.iter().map(|step| (step.segment, step.strand)),
+            walk_color,
+            4.0,
+        );
 
-            for pair in steps.windows(2) {
-                let from = pair[0];
-                let to = pair[1];
-                let (Some(&from_node), Some(&to_node)) = (
-                    graph.seg_to_node.get(&from.segment),
-                    graph.seg_to_node.get(&to.segment),
-                ) else {
-                    continue;
-                };
-                if from_node >= layout.num_nodes() || to_node >= layout.num_nodes() {
-                    continue;
-                }
-                let a = world_to_screen(
-                    oriented_exit(layout, from_node, from.strand),
-                    viewport,
-                    params,
-                );
-                let b = world_to_screen(
-                    oriented_entry(layout, to_node, to.strand),
-                    viewport,
-                    params,
-                );
-                painter.line_segment(
-                    [a, b],
-                    Stroke::new(2.5, walk_color.gamma_multiply(0.85)),
-                );
+        for pair in steps.windows(2) {
+            let from = pair[0];
+            let to = pair[1];
+            let (Some(&from_node), Some(&to_node)) = (
+                graph.seg_to_node.get(&from.segment),
+                graph.seg_to_node.get(&to.segment),
+            ) else {
+                continue;
+            };
+            if from_node >= layout.num_nodes() || to_node >= layout.num_nodes() {
+                continue;
             }
+            let a = world_to_screen(
+                oriented_exit(layout, from_node, from.strand),
+                viewport,
+                params,
+            );
+            let b = world_to_screen(oriented_entry(layout, to_node, to.strand), viewport, params);
+            painter.line_segment([a, b], Stroke::new(2.5, walk_color.gamma_multiply(0.85)));
         }
     }
 
@@ -440,6 +429,7 @@ pub fn draw_gfa_overlays(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_path_like_overlay<I>(
     painter: &Painter,
     viewport: Rect,
@@ -563,23 +553,26 @@ fn draw_overlay_legend(
     params: &RenderParams,
 ) {
     let mut entries: Vec<(Color32, String)> = Vec::new();
-    if let Some(index) = selected_path {
-        if let Some(path) = gfa.paths.get(index) {
-            entries.push((path_color, format!("Path: {}", truncate_overlay_label(&path.name, 38))));
-        }
+    if let Some(index) = selected_path
+        && let Some(path) = gfa.paths.get(index)
+    {
+        entries.push((
+            path_color,
+            format!("Path: {}", truncate_overlay_label(&path.name, 38)),
+        ));
     }
-    if let Some(index) = selected_walk {
-        if let Some(walk) = gfa.walks.get(index) {
-            entries.push((
-                walk_color,
-                format!(
-                    "Walk: {} / h{} / {}",
-                    truncate_overlay_label(&walk.sample_id, 18),
-                    walk.haplotype_index,
-                    truncate_overlay_label(&walk.sequence_id, 18)
-                ),
-            ));
-        }
+    if let Some(index) = selected_walk
+        && let Some(walk) = gfa.walks.get(index)
+    {
+        entries.push((
+            walk_color,
+            format!(
+                "Walk: {} / h{} / {}",
+                truncate_overlay_label(&walk.sample_id, 18),
+                walk.haplotype_index,
+                truncate_overlay_label(&walk.sequence_id, 18)
+            ),
+        ));
     }
     if show_containments && !gfa.containments.is_empty() {
         entries.push((
@@ -592,12 +585,15 @@ fn draw_overlay_legend(
     }
 
     let line_height = 17.0_f32;
-    let origin = viewport.left_bottom()
-        + Vec2::new(10.0, -(10.0 + line_height * entries.len() as f32));
+    let origin =
+        viewport.left_bottom() + Vec2::new(10.0, -(10.0 + line_height * entries.len() as f32));
     for (row, (color, label)) in entries.into_iter().enumerate() {
         let y = origin.y + row as f32 * line_height;
         painter.line_segment(
-            [Pos2::new(origin.x, y + 7.0), Pos2::new(origin.x + 18.0, y + 7.0)],
+            [
+                Pos2::new(origin.x, y + 7.0),
+                Pos2::new(origin.x + 18.0, y + 7.0),
+            ],
             Stroke::new(3.0, color),
         );
         painter.text(
@@ -658,10 +654,8 @@ pub fn hit_test_node(
         if pts.len() == 1 {
             min_dist = transform(pts[0]).distance(screen);
         }
-        if min_dist <= half_h {
-            if best.map_or(true, |(_, d)| min_dist < d) {
-                best = Some((ni, min_dist));
-            }
+        if min_dist <= half_h && best.is_none_or(|(_, d)| min_dist < d) {
+            best = Some((ni, min_dist));
         }
     }
     best.map(|(ni, _)| ni)

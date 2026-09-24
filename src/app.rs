@@ -4,73 +4,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use egui::{Color32, Context, Key, Pos2, Rect, Vec2};
 use egui::containers::panel::{CentralPanel, Panel};
+use egui::{Color32, Context, Key, Pos2, Rect, Vec2};
 
-use crate::export::{copy_sequence_to_clipboard, export_csv, AssemblyStats};
+use crate::export::{AssemblyStats, FigureOptions, copy_sequence_to_clipboard};
 use crate::filter::{ColorMode, FilterParams};
 use crate::gfa::GfaGraph;
 use crate::graph::ViewGraph;
+use crate::history::{History, PendingEdit};
 use crate::layout::{Layout, LayoutBackend, LayoutParams, LayoutRunner};
-use crate::render::{draw_gfa_overlays, draw_graph, hit_test_node, RenderParams};
+use crate::render::{RenderParams, draw_gfa_overlays, draw_graph, hit_test_node};
 use crate::selection::Selection;
+use crate::session::{Preferences, Session};
+use crate::tasks::{LoadJob, LoadRequest, PreparedGraph};
 use crate::ui::{
-    component_table, display_panel, filter_panel, overlays_panel, selection_panel, stats_panel,
-    DisplayOptions, OverlayAction, OverlayOptions, ThemePreset,
+    DisplayOptions, OverlayAction, OverlayOptions, ThemePreset, component_table, display_panel,
+    filter_panel, overlays_panel, selection_panel, stats_panel,
 };
+
+#[cfg(test)]
+mod tests;
+mod workflows;
+use workflows::{ColorRanges, OutputKind};
 
 // ── Load state machine ────────────────────────────────────────────────────────
 
 enum LoadState {
     Empty,
-    Loading(std::thread::JoinHandle<anyhow::Result<PreparedGraph>>),
+    Loading(LoadJob),
     Loaded {
         gfa: Arc<GfaGraph>,
         stats: AssemblyStats,
-        view: ViewGraph,
+        view: Arc<ViewGraph>,
         layout_runner: LayoutRunner,
-        layout_snapshot: Layout,
+        layout_snapshot: Arc<Layout>,
     },
     Error(String),
-}
-
-// Parsing, statistics and native FMMM initialization all run off the UI thread.
-struct PreparedGraph {
-    filter: FilterParams,
-    gfa: Arc<GfaGraph>,
-    stats: AssemblyStats,
-    view: ViewGraph,
-    runner: LayoutRunner,
-    snapshot: Layout,
-}
-
-impl PreparedGraph {
-    fn new(
-        gfa: Arc<GfaGraph>,
-        filter: &FilterParams,
-        backend: LayoutBackend,
-        publish_interval: Duration,
-    ) -> Self {
-        let stats = AssemblyStats::compute(&gfa);
-        let view = ViewGraph::from_gfa(&gfa, filter);
-        let runner = LayoutRunner::start_with_backend(
-            Arc::new(view.rebuild_clone()),
-            LayoutParams::default(),
-            backend,
-            publish_interval,
-        );
-        let snapshot = runner
-            .snapshot()
-            .expect("new layout mutex cannot be poisoned");
-        Self {
-            filter: filter.clone(),
-            gfa,
-            stats,
-            view,
-            runner,
-            snapshot,
-        }
-    }
 }
 
 // ── Interaction mode ──────────────────────────────────────────────────────────
@@ -86,6 +55,22 @@ enum InteractionMode {
 
 pub struct GfaApp {
     load_state: LoadState,
+    previous_load: Option<Box<LoadState>>,
+    preferences: Preferences,
+    source_path: Option<PathBuf>,
+    pending_recent: Option<PathBuf>,
+    output_job: Option<std::thread::JoinHandle<anyhow::Result<String>>>,
+    last_viewport: Option<Rect>,
+    export_width: u32,
+    export_height: u32,
+    export_current_view: bool,
+    strict_parsing: bool,
+    show_diagnostics: bool,
+    color_ranges: ColorRanges,
+    history: History,
+    pending_edit: Option<PendingEdit>,
+    pending_rebuild: Option<std::time::Instant>,
+    applied_filter: FilterParams,
     layout_backend: LayoutBackend,
     remote_ui: bool,
     filter: FilterParams,
@@ -121,13 +106,37 @@ impl GfaApp {
         layout_backend: LayoutBackend,
         remote_ui: bool,
     ) -> Self {
-        configure_style(&cc.egui_ctx, ThemePreset::Graphite);
+        let mut preferences: Preferences = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, "graphite.preferences.v1"))
+            .unwrap_or_default();
+        if !crate::session::valid_display(&preferences.display) {
+            preferences.display = DisplayOptions::default();
+        }
+        preferences.recent_files.truncate(10);
+        configure_style(&cc.egui_ctx, preferences.display.theme);
         let mut app = Self {
             load_state: LoadState::Empty,
+            display: preferences.display.clone(),
+            preferences,
+            previous_load: None,
+            source_path: None,
+            pending_recent: None,
+            output_job: None,
+            last_viewport: None,
+            export_width: 2400,
+            export_height: 1600,
+            export_current_view: false,
+            strict_parsing: false,
+            show_diagnostics: false,
+            color_ranges: ColorRanges::default(),
+            history: History::default(),
+            pending_edit: None,
+            pending_rebuild: None,
+            applied_filter: FilterParams::default(),
             layout_backend,
             remote_ui,
             filter: FilterParams::default(),
-            display: DisplayOptions::default(),
             overlays: OverlayOptions::default(),
             selection: Selection::default(),
             zoom: 1.0,
@@ -167,232 +176,240 @@ impl GfaApp {
     }
 
     fn start_load(&mut self, path: PathBuf) {
+        let is_session = path
+            .extension()
+            .is_some_and(|ext| ext == "json" || ext == "graphite");
+        let request = if is_session {
+            LoadRequest::Session(path.clone())
+        } else {
+            LoadRequest::File(path.clone())
+        };
         self.status_msg = format!("Loading {}…", path.display());
-        self.selection.clear();
-        self.overlays = OverlayOptions::default();
-        self.pan = Vec2::ZERO;
-        self.zoom = 1.0;
+        self.begin_load(request);
+        self.pending_recent = Some(path);
+    }
 
+    fn begin_load(&mut self, request: LoadRequest) {
+        self.cancel_load();
+        self.finish_edit();
+        if let LoadState::Loaded { layout_runner, .. } = &self.load_state {
+            layout_runner.set_attractor(None);
+        }
+        self.pending_rebuild = None;
+        let job = LoadJob::spawn(
+            request,
+            self.filter.clone(),
+            self.layout_backend,
+            self.layout_publish_interval(),
+            self.strict_parsing,
+        );
+        let old = std::mem::replace(&mut self.load_state, LoadState::Loading(job));
+        self.previous_load = Some(Box::new(old));
         self.grabbed_phys = None;
         self.grab_world = None;
-        self.pending_focus_nodes = None;
-        let filter = self.filter.clone();
-        let backend = self.layout_backend;
-        let publish_interval = self.layout_publish_interval();
-        let handle = std::thread::spawn(move || {
-            let gfa = Arc::new(crate::gfa::parse_gfa(&path)?);
-            Ok(PreparedGraph::new(
-                gfa,
-                &filter,
-                backend,
-                publish_interval,
-            ))
-        });
-        self.load_state = LoadState::Loading(handle);
+    }
+
+    fn cancel_load(&mut self) {
+        if matches!(self.load_state, LoadState::Loading(_)) {
+            self.load_state = self
+                .previous_load
+                .take()
+                .map(|s| *s)
+                .unwrap_or(LoadState::Empty);
+            self.status_msg = "Loading cancelled.".into();
+            self.filter = self.applied_filter.clone();
+            self.pending_recent = None;
+        }
     }
 
     fn check_loading(&mut self, ctx: &Context) {
-        let ready = if let LoadState::Loading(h) = &self.load_state {
-            h.is_finished()
-        } else {
-            false
-        };
-
-        if ready {
-            let old = std::mem::replace(&mut self.load_state, LoadState::Empty);
-            if let LoadState::Loading(handle) = old {
-                match handle
-                    .join()
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("thread panic")))
-                {
-                    Ok(PreparedGraph {
-                        filter,
+        let ready = matches!(&self.load_state, LoadState::Loading(job) if job.is_finished());
+        if ready
+            && let LoadState::Loading(job) =
+                std::mem::replace(&mut self.load_state, LoadState::Empty)
+        {
+            match job.finish() {
+                Ok(PreparedGraph {
+                    filter,
+                    source,
+                    gfa,
+                    stats,
+                    view,
+                    runner,
+                    snapshot,
+                    session,
+                }) => {
+                    self.previous_load = None;
+                    self.source_path = Some(source);
+                    self.color_ranges = ColorRanges::from_graph(&view);
+                    self.applied_filter = filter.clone();
+                    self.filter = filter;
+                    self.selection.clear();
+                    self.overlays = OverlayOptions::default();
+                    self.history.clear();
+                    self.pending_edit = None;
+                    self.pending_focus_nodes = None;
+                    self.component_page = 0;
+                    self.zoom = 1.0;
+                    self.pan = Vec2::ZERO;
+                    self.pending_fit = true;
+                    self.show_diagnostics = !gfa.diagnostics.is_empty();
+                    self.status_msg = format!(
+                        "Loaded {} segments, {} links, {} warnings.",
+                        gfa.segments.len(),
+                        gfa.links.len(),
+                        gfa.diagnostics.len()
+                    );
+                    if let Some(session) = session {
+                        self.display = session.display;
+                        self.overlays = session.overlays;
+                        self.selection.nodes.extend(session.selection);
+                        self.zoom = session.zoom;
+                        self.pan = Vec2::new(session.pan[0], session.pan[1]);
+                        self.pending_fit = false;
+                        configure_style(ctx, self.display.theme);
+                    }
+                    self.load_state = LoadState::Loaded {
                         gfa,
                         stats,
                         view,
-                        runner,
-                        snapshot,
-                    }) => {
-                        if filter != self.filter {
-                            let filter = self.filter.clone();
-                            let backend = self.layout_backend;
-                            let publish_interval = self.layout_publish_interval();
-                            self.load_state = LoadState::Loading(std::thread::spawn(move || {
-                                Ok(PreparedGraph::new(
-                                    gfa,
-                                    &filter,
-                                    backend,
-                                    publish_interval,
-                                ))
-                            }));
-                            return;
-                        }
-                        // Auto-scale depth / read-depth color range on initial load
-                        let mut min_depth_color = 0.0;
-                        let mut max_depth_color = 100.0;
-                        let scale_values: Vec<f32> = view
-                            .nodes
-                            .iter()
-                            .filter_map(|n| match self.display.color_mode {
-                                ColorMode::ReadCount => n.read_count.map(|v| v as f32),
-                                _ => n.depth.map(|v| v as f32),
-                            })
-                            .collect();
-                        if !scale_values.is_empty() {
-                            let mn = scale_values.iter().cloned().fold(f32::INFINITY, f32::min);
-                            let mx = scale_values
-                                .iter()
-                                .cloned()
-                                .fold(f32::NEG_INFINITY, f32::max);
-                            min_depth_color = (mn - 1.0).max(0.0);
-                            max_depth_color = if mx == mn { mn + 1.0 } else { mx + 1.0 };
-                        }
-
-                        self.status_msg = format!(
-                            "Loaded {} segments, {} links, {} jumps, {} paths, {} walks",
-                            gfa.segments.len(),
-                            gfa.links.len(),
-                            gfa.jumps.len(),
-                            gfa.paths.len(),
-                            gfa.walks.len()
-                        );
-                        self.display.min_depth_color = min_depth_color;
-                        self.display.max_depth_color = max_depth_color;
-                        self.load_state = LoadState::Loaded {
-                            gfa,
-                            stats,
-                            view,
-                            layout_runner: runner,
-                            layout_snapshot: snapshot,
-                        };
-                        // Signal canvas to auto-fit once layout is shown.
-                        self.pending_fit = true;
+                        layout_runner: runner,
+                        layout_snapshot: Arc::new(snapshot),
+                    };
+                    if let Some(path) = self.pending_recent.take() {
+                        self.preferences
+                            .remember(path.canonicalize().unwrap_or(path));
                     }
-                    Err(e) => {
-                        self.status_msg = format!("Error: {e}");
-                        self.load_state = LoadState::Error(e.to_string());
-                    }
+                }
+                Err(error) => {
+                    self.status_msg = format!("Loading failed: {error:#}");
+                    self.load_state = self
+                        .previous_load
+                        .take()
+                        .map(|s| *s)
+                        .unwrap_or_else(|| LoadState::Error(format!("{error:#}")));
+                    self.pending_recent = None;
+                    self.filter = self.applied_filter.clone();
                 }
             }
         }
-
-        // Poll layout progress.
         if let LoadState::Loaded {
             layout_runner,
             layout_snapshot,
             ..
         } = &mut self.load_state
+            && layout_runner.snapshot_changed(layout_snapshot)
+            && layout_runner.update_snapshot(Arc::make_mut(layout_snapshot))
         {
-            if layout_runner.is_running() {
-                if layout_runner.update_snapshot(layout_snapshot) {
-                    ctx.request_repaint();
-                }
-            }
+            ctx.request_repaint();
+        }
+        if self.grabbed_phys.is_none()
+            && matches!(&self.load_state, LoadState::Loaded { layout_snapshot, .. } if layout_snapshot.converged)
+        {
+            self.finish_edit();
+        }
+        if self
+            .output_job
+            .as_ref()
+            .is_some_and(|job| job.is_finished())
+        {
+            let result = self
+                .output_job
+                .take()
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Output worker panicked")));
+            self.status_msg = match result {
+                Ok(message) => message,
+                Err(error) => format!("Output failed: {error:#}"),
+            };
         }
     }
 
     fn rebuild_view(&mut self) {
-        self.grabbed_phys = None;
-        self.grab_world = None;
-        self.pending_focus_nodes = None;
         if let LoadState::Loaded { gfa, .. } = &self.load_state {
-            let gfa = gfa.clone();
-            let filter = self.filter.clone();
-            let backend = self.layout_backend;
-            let publish_interval = self.layout_publish_interval();
-            self.selection.clear();
-            self.status_msg = format!("Computing {} layout…", backend.as_str());
-            self.load_state = LoadState::Loading(std::thread::spawn(move || {
-                Ok(PreparedGraph::new(
-                    gfa,
-                    &filter,
-                    backend,
-                    publish_interval,
-                ))
-            }));
+            let request = LoadRequest::Rebuild {
+                gfa: gfa.clone(),
+                source: self.source_path.clone().unwrap_or_default(),
+            };
+            self.status_msg = "Updating filtered graph…".into();
+            self.begin_load(request);
         }
     }
 
     fn export_figure(&mut self, path: &std::path::Path, svg: bool) {
-        let params = self.render_params();
-        let result = match &self.load_state {
-            LoadState::Loaded {
-                gfa,
-                view,
-                layout_snapshot,
-                ..
-            } if svg => crate::export::export_svg_with_overlays(
-                path,
-                gfa,
-                view,
-                layout_snapshot,
-                &params,
-                self.overlays.selected_path,
-                self.overlays.selected_walk,
-                self.overlays.show_containments,
-            ),
-            LoadState::Loaded {
-                gfa,
-                view,
-                layout_snapshot,
-                ..
-            } => crate::export::export_png_with_overlays(
-                path,
-                gfa,
-                view,
-                layout_snapshot,
-                &params,
-                self.overlays.selected_path,
-                self.overlays.selected_walk,
-                self.overlays.show_containments,
-            ),
-            _ => Err(anyhow::anyhow!("No loaded graph to export")),
-        };
-        self.status_msg = match result {
-            Ok(()) if svg => format!("SVG figure exported to {}.", path.display()),
-            Ok(()) => format!("PNG figure exported to {}.", path.display()),
-            Err(error) => format!("Figure export error: {error}"),
-        };
+        self.start_output(
+            path.to_path_buf(),
+            if svg {
+                OutputKind::Svg
+            } else {
+                OutputKind::Png
+            },
+        );
     }
 
     fn top_menu(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
-        let can_export_figure = matches!(&self.load_state, LoadState::Loaded { .. });
-        let (can_export_fasta, fasta_disabled_reason) =
-            if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
-                let has_selected_sequence = self.selection.nodes.iter().any(|&node_index| {
-                    view.nodes
-                        .get(node_index)
-                        .and_then(|node| gfa.segments.get(node.seg_idx))
-                        .is_some_and(|segment| !segment.seq_range.is_empty())
-                });
-                let reason = if self.selection.is_empty() {
-                    "Select one or more segments before exporting FASTA."
-                } else if gfa.sequence_segment_count == 0 {
-                    "This graph contains no embedded nucleotide sequences. FASTA export is unavailable for .noseq GFA files."
-                } else {
-                    "The current selection contains no embedded nucleotide sequence."
-                };
-                (has_selected_sequence, reason)
+        let can_export_figure =
+            self.output_job.is_none() && matches!(&self.load_state, LoadState::Loaded { .. });
+        let (can_export_fasta, fasta_disabled_reason) = if let LoadState::Loaded {
+            gfa, view, ..
+        } = &self.load_state
+        {
+            let has_selected_sequence = self.selection.nodes.iter().any(|&node_index| {
+                view.nodes
+                    .get(node_index)
+                    .and_then(|node| gfa.segments.get(node.seg_idx))
+                    .is_some_and(|segment| !segment.seq_range.is_empty())
+            });
+            let reason = if self.selection.is_empty() {
+                "Select one or more segments before exporting FASTA."
+            } else if gfa.sequence_segment_count == 0 {
+                "This graph contains no embedded nucleotide sequences. FASTA export is unavailable for .noseq GFA files."
             } else {
-                (false, "Load a graph and select one or more segments first.")
+                "The current selection contains no embedded nucleotide sequence."
             };
+            (has_selected_sequence && self.output_job.is_none(), reason)
+        } else {
+            (false, "Load a graph and select one or more segments first.")
+        };
 
         Panel::top("menu_bar").show(root_ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open GFA…").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("GFA", &["gfa", "gfa1", "gfa2"])
+                            .add_filter("GFA (plain or gzip)", &["gfa", "gfa1", "gfa2", "gz"])
                             .pick_file()
                         {
                             self.start_load(path);
                         }
                         ui.close();
                     }
+                    self.file_workflow_menu(ui);
                 });
 
+                self.edit_menu(ui);
                 ui.menu_button("Export", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Size");
+                        ui.add(
+                            egui::DragValue::new(&mut self.export_width)
+                                .range(64..=16384)
+                                .suffix(" px"),
+                        );
+                        ui.label("×");
+                        ui.add(
+                            egui::DragValue::new(&mut self.export_height)
+                                .range(64..=16384)
+                                .suffix(" px"),
+                        );
+                    });
+                    ui.checkbox(
+                        &mut self.export_current_view,
+                        "Export current viewport only",
+                    );
+                    ui.separator();
                     let svg = ui
                         .add_enabled(can_export_figure, egui::Button::new("Figure as SVG…"))
                         .on_disabled_hover_text("Load a graph before exporting a figure.");
@@ -408,10 +425,7 @@ impl GfaApp {
                     }
 
                     let png = ui
-                        .add_enabled(
-                            can_export_figure,
-                            egui::Button::new("Figure as PNG (2400 × 1600)…"),
-                        )
+                        .add_enabled(can_export_figure, egui::Button::new("Figure as PNG…"))
                         .on_disabled_hover_text("Load a graph before exporting a figure.");
                     if png.clicked() {
                         if let Some(path) = rfd::FileDialog::new()
@@ -438,19 +452,16 @@ impl GfaApp {
                             .set_file_name("selection.fasta")
                             .save_file()
                         {
-                            if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
-                                match crate::export::export_fasta(&path, gfa, view, &self.selection)
-                                {
-                                    Ok(_) => self.status_msg = "FASTA exported.".to_string(),
-                                    Err(e) => self.status_msg = format!("Export error: {e}"),
-                                }
-                            }
+                            self.start_output(path, OutputKind::Fasta);
                         }
                         ui.close();
                     }
 
                     let csv = ui
-                        .add_enabled(can_export_figure, egui::Button::new("Graph statistics as CSV…"))
+                        .add_enabled(
+                            can_export_figure,
+                            egui::Button::new("Graph statistics as CSV…"),
+                        )
                         .on_disabled_hover_text("Load a graph before exporting statistics.");
                     if csv.clicked() {
                         if let Some(path) = rfd::FileDialog::new()
@@ -458,12 +469,7 @@ impl GfaApp {
                             .set_file_name("graphite-stats.csv")
                             .save_file()
                         {
-                            if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
-                                match export_csv(&path, gfa, view, &self.selection) {
-                                    Ok(_) => self.status_msg = "CSV exported.".to_string(),
-                                    Err(e) => self.status_msg = format!("Export error: {e}"),
-                                }
-                            }
+                            self.start_output(path, OutputKind::Csv);
                         }
                         ui.close();
                     }
@@ -517,6 +523,18 @@ impl GfaApp {
                 });
 
                 ui.menu_button("Settings", |ui| {
+                    ui.checkbox(
+                        &mut self.strict_parsing,
+                        "Reject graphs with parser warnings",
+                    )
+                    .on_hover_text(
+                        "Applies on the next load. Duplicate segment names are always rejected.",
+                    );
+                    if ui.button("Show parser diagnostics").clicked() {
+                        self.show_diagnostics = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     ui.menu_button("Theme", |ui| {
                         for theme in [
                             ThemePreset::Graphite,
@@ -576,51 +594,54 @@ impl GfaApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                    if self.show_filter_panel {
-                        let changed = filter_panel(ui, &mut self.filter);
-                        if changed {
-                            self.rebuild_view();
-                        }
-                        ui.separator();
-                    }
-                    if self.show_display_panel {
-                        let previous_theme = self.display.theme;
-                        if display_panel(ui, &mut self.display) {
-                            if self.display.theme != previous_theme {
-                                configure_style(&ctx, self.display.theme);
+                        if self.show_filter_panel {
+                            let changed = ui
+                                .add_enabled_ui(
+                                    !matches!(self.load_state, LoadState::Loading(_)),
+                                    |ui| filter_panel(ui, &mut self.filter),
+                                )
+                                .inner;
+                            if changed {
+                                self.pending_rebuild = Some(std::time::Instant::now());
                             }
-                            ctx.request_repaint();
+                            ui.separator();
                         }
-                        ui.separator();
-                    }
-                    if self.show_overlay_panel {
-                        let mut overlay_action = None;
-                        if let LoadState::Loaded { gfa, .. } = &self.load_state {
-                            if !gfa.paths.is_empty()
-                                || !gfa.walks.is_empty()
-                                || !gfa.containments.is_empty()
+                        if self.show_display_panel {
+                            let previous_theme = self.display.theme;
+                            if display_panel(ui, &mut self.display) {
+                                if self.display.theme != previous_theme {
+                                    configure_style(&ctx, self.display.theme);
+                                }
+                                ctx.request_repaint();
+                            }
+                            ui.separator();
+                        }
+                        if self.show_overlay_panel {
+                            let mut overlay_action = None;
+                            if let LoadState::Loaded { gfa, .. } = &self.load_state
+                                && (!gfa.paths.is_empty()
+                                    || !gfa.walks.is_empty()
+                                    || !gfa.containments.is_empty())
                             {
-                                let (changed, action) =
-                                    overlays_panel(ui, gfa, &mut self.overlays);
+                                let (changed, action) = overlays_panel(ui, gfa, &mut self.overlays);
                                 if changed {
                                     ctx.request_repaint();
                                 }
                                 overlay_action = action;
                                 ui.separator();
                             }
+                            if let Some(action) = overlay_action {
+                                self.apply_overlay_action(action);
+                                ctx.request_repaint();
+                            }
                         }
-                        if let Some(action) = overlay_action {
-                            self.apply_overlay_action(action);
-                            ctx.request_repaint();
-                        }
-                    }
-                    if self.show_stats_panel {
-                        if let LoadState::Loaded { stats, view, .. } = &self.load_state {
+                        if self.show_stats_panel
+                            && let LoadState::Loaded { stats, view, .. } = &self.load_state
+                        {
                             stats_panel(ui, stats, view);
                             ui.separator();
                         }
-                    }
-                });
+                    });
             });
     }
 
@@ -640,53 +661,46 @@ impl GfaApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                    if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
-                        focus_component = component_table(
-                            ui,
-                            &view.components,
-                            &mut self.component_query,
-                            &mut self.component_page,
-                        );
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                        selection_panel(
-                            ui,
-                            &self.selection,
-                            gfa,
-                            view,
-                            &mut copy_seq,
-                            &mut export_fasta,
-                            &mut sel_component,
-                        );
-                    } else {
-                        ui.label("No file loaded.");
-                    }
-                });
+                        if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
+                            focus_component = component_table(
+                                ui,
+                                &view.components,
+                                &mut self.component_query,
+                                &mut self.component_page,
+                            );
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            selection_panel(
+                                ui,
+                                &self.selection,
+                                gfa,
+                                view,
+                                &mut copy_seq,
+                                &mut export_fasta,
+                                &mut sel_component,
+                            );
+                        } else {
+                            ui.label("No file loaded.");
+                        }
+                    });
             });
 
         if copy_seq {
             self.copy_selected_sequences(&ctx);
         }
-        if export_fasta {
-            if let Some(path) = rfd::FileDialog::new()
+        if export_fasta
+            && let Some(path) = rfd::FileDialog::new()
                 .add_filter("FASTA", &["fa", "fasta"])
                 .save_file()
-            {
-                if let LoadState::Loaded { gfa, view, .. } = &self.load_state {
-                    match crate::export::export_fasta(&path, gfa, view, &self.selection) {
-                        Ok(_) => self.status_msg = "FASTA exported.".to_string(),
-                        Err(e) => self.status_msg = format!("Error: {e}"),
-                    }
-                }
-            }
+        {
+            self.start_output(path, OutputKind::Fasta);
         }
-        if sel_component {
-            if let Some(&start) = self.selection.nodes.iter().next() {
-                if let LoadState::Loaded { view, .. } = &self.load_state {
-                    self.selection.select_component(start, view, false);
-                }
-            }
+        if sel_component
+            && let Some(&start) = self.selection.nodes.iter().next()
+            && let LoadState::Loaded { view, .. } = &self.load_state
+        {
+            self.selection.select_component(start, view, false);
         }
         if let Some(nodes) = focus_component {
             self.selection.clear();
@@ -712,7 +726,11 @@ impl GfaApp {
                     .collect();
                 nodes.sort_unstable();
                 nodes.dedup();
-                (nodes, path.steps.len(), format!("path {}", path.name.as_ref()))
+                (
+                    nodes,
+                    path.steps.len(),
+                    format!("path {}", path.name.as_ref()),
+                )
             }
             (
                 LoadState::Loaded { gfa, view, .. },
@@ -786,8 +804,7 @@ impl GfaApp {
             ctx.copy_text(sequence);
             self.status_msg = "Selected sequence(s) copied to clipboard.".to_string();
         } else {
-            self.status_msg =
-                "No selected segment with an embedded sequence to copy.".to_string();
+            self.status_msg = "No selected segment with an embedded sequence to copy.".to_string();
         }
     }
 
@@ -796,331 +813,346 @@ impl GfaApp {
         CentralPanel::default()
             .frame(egui::Frame::new().fill(self.display.theme.canvas_background()))
             .show(root_ui, |ui| {
-            match &self.load_state {
-                LoadState::Empty => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Open a GFA file via File → Open GFA…");
-                    });
-                    return;
-                }
-                LoadState::Loading(_) => {
-                    ui.centered_and_justified(|ui| {
-                        ui.spinner();
-                        ui.label("Loading graph and computing layout…");
-                    });
-                    return;
-                }
-                LoadState::Error(msg) => {
-                    ui.centered_and_justified(|ui| {
-                        ui.colored_label(Color32::RED, msg);
-                    });
-                    return;
-                }
-                LoadState::Loaded { .. } => {}
-            }
-
-            let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
-            let viewport = response.rect;
-
-            // Explicitly give the graph canvas keyboard focus after pointer
-            // interaction. egui TextEdits keep focus until another widget asks
-            // for it, so after using a filter/search field Ctrl+C could remain
-            // routed to that stale text focus instead of the graph selection.
-            if response.clicked() || response.drag_started() {
-                response.request_focus();
-            }
-            if let Some(nodes) = self.pending_focus_nodes.take() {
-                self.focus_nodes_with_viewport(&nodes, viewport);
-            }
-
-            // ── Interaction ──────────────────────────────────────────────────
-
-            // Zoom with scroll / pinch.
-            if response.hovered() {
-                // Use zoom_delta (trackpad pinch) if available; fall back to scroll.
-                let delta_zoom = ctx.input(|i| i.zoom_delta());
-                let was_zoomed = delta_zoom != 1.0;
-
-                let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                let was_scrolled = scroll != 0.0;
-
-                if was_scrolled || was_zoomed {
-                    let old_zoom = self.zoom;
-                    if was_zoomed && !was_scrolled {
-                        // Pure touchpad pinch.
-                        self.zoom = (self.zoom * delta_zoom).clamp(0.00001, 1000.0);
-                    } else if was_scrolled {
-                        // Mouse wheel — exponential scaling for smooth control.
-                        let factor = (scroll * -0.001).exp();
-                        self.zoom = (self.zoom * factor).clamp(0.00001, 1000.0);
+                match &self.load_state {
+                    LoadState::Empty => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Open a GFA file via File → Open GFA…");
+                        });
+                        return;
                     }
-
-                    // "Pinch-to-cursor": keep the world point under the mouse stationary.
-                    if let Some(cursor) = ctx.input(|i| i.pointer.hover_pos()) {
-                        let vp_center = viewport.center();
-                        let world_x = (cursor.x - vp_center.x - self.pan.x) / old_zoom;
-                        let world_y = (cursor.y - vp_center.y - self.pan.y) / old_zoom;
-                        self.pan.x = cursor.x - vp_center.x - world_x * self.zoom;
-                        self.pan.y = cursor.y - vp_center.y - world_y * self.zoom;
-                    }
-                }
-            }
-
-            // Pan with middle-mouse drag or left-drag in Pan mode.
-            let mmb = ctx.input(|i| i.pointer.middle_down());
-            if mmb
-                || (self.interaction_mode == InteractionMode::Pan
-                    && response.dragged_by(egui::PointerButton::Primary))
-            {
-                self.pan += response.drag_delta();
-            }
-
-            // Selection click.
-            if self.interaction_mode == InteractionMode::Select {
-                if response.clicked() {
-                    let click_pos = response.interact_pointer_pos().unwrap_or_default();
-                    let add = ctx.input(|i| i.modifiers.shift);
-                    if let LoadState::Loaded {
-                        view,
-                        layout_snapshot,
-                        ..
-                    } = &self.load_state
-                    {
-                        let render_p = self.render_params();
-                        if let Some(ni) =
-                            hit_test_node(click_pos, viewport, view, layout_snapshot, &render_p)
-                        {
-                            self.selection.select_node(ni, add);
-                            self.status_msg = format!("Selected: {}", view.nodes[ni].name);
-                        } else if !add {
-                            self.selection.clear();
-                        }
-                    }
-                }
-
-                // Rubber-band drag.
-                if response.drag_started_by(egui::PointerButton::Primary) {
-                    self.rubber_start = response.interact_pointer_pos();
-                }
-                if response.drag_stopped() {
-                    if let Some(start) = self.rubber_start.take() {
-                        if let Some(end) = response.interact_pointer_pos() {
-                            let rect = Rect::from_two_pos(start, end);
-                            if rect.width() > 4.0 || rect.height() > 4.0 {
-                                let add = ctx.input(|i| i.modifiers.shift);
-                                if let LoadState::Loaded {
-                                    view,
-                                    layout_snapshot,
-                                    ..
-                                } = &self.load_state
-                                {
-                                    self.selection.rubber_band_select(
-                                        rect,
-                                        view,
-                                        layout_snapshot,
-                                        self.zoom,
-                                        self.pan,
-                                        viewport.center(),
-                                        add,
-                                    );
+                    LoadState::Loading(job) => {
+                        let stage = job.stage();
+                        ui.centered_and_justified(|ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.spinner();
+                                ui.label(stage);
+                                if ui.button("Cancel loading").clicked() {
+                                    self.cancel_load();
                                 }
-                            }
+                            });
+                        });
+                        return;
+                    }
+                    LoadState::Error(msg) => {
+                        ui.centered_and_justified(|ui| {
+                            ui.colored_label(Color32::RED, msg);
+                        });
+                        return;
+                    }
+                    LoadState::Loaded { .. } => {}
+                }
+
+                let response =
+                    ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
+                let viewport = response.rect;
+                self.last_viewport = Some(viewport);
+
+                // Explicitly give the graph canvas keyboard focus after pointer
+                // interaction. egui TextEdits keep focus until another widget asks
+                // for it, so after using a filter/search field Ctrl+C could remain
+                // routed to that stale text focus instead of the graph selection.
+                if response.clicked() || response.drag_started() {
+                    response.request_focus();
+                }
+                if let Some(nodes) = self.pending_focus_nodes.take() {
+                    self.focus_nodes_with_viewport(&nodes, viewport);
+                }
+
+                // ── Interaction ──────────────────────────────────────────────────
+
+                // Zoom with scroll / pinch.
+                if response.hovered() {
+                    // Use zoom_delta (trackpad pinch) if available; fall back to scroll.
+                    let delta_zoom = ctx.input(|i| i.zoom_delta());
+                    let was_zoomed = delta_zoom != 1.0;
+
+                    let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+                    let was_scrolled = scroll != 0.0;
+
+                    if was_scrolled || was_zoomed {
+                        let old_zoom = self.zoom;
+                        if was_zoomed && !was_scrolled {
+                            // Pure touchpad pinch.
+                            self.zoom = (self.zoom * delta_zoom).clamp(0.00001, 1000.0);
+                        } else if was_scrolled {
+                            // Mouse wheel — exponential scaling for smooth control.
+                            let factor = (scroll * -0.001).exp();
+                            self.zoom = (self.zoom * factor).clamp(0.00001, 1000.0);
+                        }
+
+                        // "Pinch-to-cursor": keep the world point under the mouse stationary.
+                        if let Some(cursor) = ctx.input(|i| i.pointer.hover_pos()) {
+                            let vp_center = viewport.center();
+                            let world_x = (cursor.x - vp_center.x - self.pan.x) / old_zoom;
+                            let world_y = (cursor.y - vp_center.y - self.pan.y) / old_zoom;
+                            self.pan.x = cursor.x - vp_center.x - world_x * self.zoom;
+                            self.pan.y = cursor.y - vp_center.y - world_y * self.zoom;
                         }
                     }
                 }
-            }
 
-            // Mode toggle with 'S' / 'P' / 'G' shortcuts.
-            ctx.input(|i| {
-                if i.key_pressed(Key::P) {
-                    self.interaction_mode = InteractionMode::Pan;
+                // Pan with middle-mouse drag or left-drag in Pan mode.
+                let mmb = ctx.input(|i| i.pointer.middle_down());
+                if mmb
+                    || (self.interaction_mode == InteractionMode::Pan
+                        && response.dragged_by(egui::PointerButton::Primary))
+                {
+                    self.pan += response.drag_delta();
                 }
-                if i.key_pressed(Key::S) {
-                    self.interaction_mode = InteractionMode::Select;
-                }
-                if i.key_pressed(Key::G) {
-                    self.interaction_mode = InteractionMode::Grab;
-                }
-                if i.key_pressed(Key::F) {
-                    self.fit_to_screen_with_viewport(viewport);
-                }
-            });
 
-            // ── Grab / PBD graph manipulation ─────────────────────────────────
-            if self.interaction_mode == InteractionMode::Grab {
-                let vp_center = viewport.center();
-                let cursor_world = ctx.input(|i| i.pointer.hover_pos()).map(|cursor| {
-                    let wx = (cursor.x - vp_center.x - self.pan.x) / self.zoom;
-                    let wy = (cursor.y - vp_center.y - self.pan.y) / self.zoom;
-                    [wx, wy]
-                });
-
-                let just_pressed = response.drag_started_by(egui::PointerButton::Primary);
-                let dragging = response.dragged_by(egui::PointerButton::Primary);
-                let just_released = response.drag_stopped_by(egui::PointerButton::Primary);
-
-                if just_pressed {
-                    let render_p = self.render_params();
-                    if let (
-                        Some(screen),
-                        LoadState::Loaded {
+                // Selection click.
+                if self.interaction_mode == InteractionMode::Select {
+                    if response.clicked() {
+                        let click_pos = response.interact_pointer_pos().unwrap_or_default();
+                        let add = ctx.input(|i| i.modifiers.shift);
+                        if let LoadState::Loaded {
                             view,
                             layout_snapshot,
                             ..
-                        },
-                    ) = (ctx.input(|i| i.pointer.press_origin()), &self.load_state)
-                    {
-                        let w = [
-                            (screen.x - vp_center.x - self.pan.x) / self.zoom,
-                            (screen.y - vp_center.y - self.pan.y) / self.zoom,
-                        ];
-                        self.grabbed_phys =
-                            hit_test_node(screen, viewport, view, layout_snapshot, &render_p)
-                                .and_then(|ni| layout_snapshot.nearest_physics_point(ni, w));
-                        if let Some(pi) = self.grabbed_phys {
-                            let p = layout_snapshot.positions[pi];
-                            self.grab_offset = [p[0] - w[0], p[1] - w[1]];
+                        } = &self.load_state
+                        {
+                            let render_p = self.render_params();
+                            if let Some(ni) =
+                                hit_test_node(click_pos, viewport, view, layout_snapshot, &render_p)
+                            {
+                                self.selection.select_node(ni, add);
+                                self.status_msg = format!("Selected: {}", view.nodes[ni].name);
+                            } else if !add {
+                                self.selection.clear();
+                            }
                         }
                     }
-                }
 
-                if dragging {
-                    if let Some(wpos) = cursor_world {
-                        self.grab_world =
-                            Some([wpos[0] + self.grab_offset[0], wpos[1] + self.grab_offset[1]]);
+                    // Rubber-band drag.
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        self.rubber_start = response.interact_pointer_pos();
                     }
-                } else if just_released {
-                    self.grabbed_phys = None;
-                    self.grab_world = None;
-                }
-
-                // Push (cursor_pos, grabbed_node) to layout runner.
-                if let LoadState::Loaded {
-                    layout_runner,
-                    layout_snapshot,
-                    ..
-                } = &mut self.load_state
-                {
-                    let att = self
-                        .grab_world
-                        .zip(self.grabbed_phys)
-                        .map(|(pos, pi)| (pos, pi));
-                    layout_runner.set_attractor(att);
-                    if let Some((pos, pi)) = att {
-                        layout_snapshot.drag_preview_to(pos, pi);
-                    }
-                    if dragging {
-                        ctx.request_repaint();
-                    }
-                }
-            } else {
-                // Clear grab when mode switches.
-                self.grabbed_phys = None;
-                self.grab_world = None;
-                if let LoadState::Loaded { layout_runner, .. } = &self.load_state {
-                    layout_runner.set_attractor(None);
-                }
-            }
-
-            // ── Draw ─────────────────────────────────────────────────────────
-            if let LoadState::Loaded {
-                gfa,
-                view,
-                layout_snapshot,
-                ..
-            } = &self.load_state
-            {
-                let painter = ui.painter_at(viewport);
-                // Background.
-                painter.rect_filled(viewport, 0.0, self.display.theme.canvas_background());
-
-                let rp = self.render_params();
-                draw_graph(
-                    &painter,
-                    viewport,
-                    view,
-                    layout_snapshot,
-                    &self.selection,
-                    &rp,
-                );
-
-                draw_gfa_overlays(
-                    &painter,
-                    viewport,
-                    gfa,
-                    view,
-                    layout_snapshot,
-                    &rp,
-                    self.overlays.selected_path,
-                    self.overlays.selected_walk,
-                    self.overlays.show_containments,
-                );
-
-                // Rubber-band rect.
-                if self.interaction_mode == InteractionMode::Select {
-                    if let Some(start) = self.rubber_start {
-                        if response.dragged_by(egui::PointerButton::Primary) {
-                            if let Some(cur) = response.interact_pointer_pos() {
-                                let rect = Rect::from_two_pos(start, cur);
-                                painter.rect_stroke(
+                    if response.drag_stopped()
+                        && let Some(start) = self.rubber_start.take()
+                        && let Some(end) = response.interact_pointer_pos()
+                    {
+                        let rect = Rect::from_two_pos(start, end);
+                        if rect.width() > 4.0 || rect.height() > 4.0 {
+                            let add = ctx.input(|i| i.modifiers.shift);
+                            if let LoadState::Loaded {
+                                view,
+                                layout_snapshot,
+                                ..
+                            } = &self.load_state
+                            {
+                                self.selection.rubber_band_select(
                                     rect,
-                                    0.0,
-                                    egui::Stroke::new(1.0, Color32::YELLOW),
-                                    egui::StrokeKind::Inside,
-                                );
-                                painter.rect_filled(
-                                    rect,
-                                    0.0,
-                                    Color32::from_rgba_unmultiplied(255, 255, 100, 20),
+                                    view,
+                                    layout_snapshot,
+                                    self.zoom,
+                                    self.pan,
+                                    viewport.center(),
+                                    add,
                                 );
                             }
                         }
                     }
                 }
 
-                // Status overlay (mode indicator).
-                painter.text(
-                    viewport.min + Vec2::new(8.0, 8.0),
-                    egui::Align2::LEFT_TOP,
-                    match self.interaction_mode {
-                        InteractionMode::Pan => "Mode: Pan  [P/S/G]",
-                        InteractionMode::Select => "Mode: Select  [P/S/G, F=fit]",
-                        InteractionMode::Grab => "Mode: Grab  [P/S/G] — drag a contig to move it",
-                    },
-                    egui::FontId::proportional(12.0),
-                    self.display.theme.canvas_foreground().gamma_multiply(0.8),
-                );
-
-                // Auto-fit once after load (do after layout is available).
-                if self.pending_fit {
-                    self.fit_to_screen_with_viewport(viewport);
-                    self.pending_fit = false;
+                // Mode toggle with 'S' / 'P' / 'G' shortcuts.
+                if !ctx.text_edit_focused() {
+                    ctx.input(|i| {
+                        if i.modifiers.command || i.modifiers.alt {
+                            return;
+                        }
+                        if i.key_pressed(Key::P) {
+                            self.interaction_mode = InteractionMode::Pan;
+                        }
+                        if i.key_pressed(Key::S) {
+                            self.interaction_mode = InteractionMode::Select;
+                        }
+                        if i.key_pressed(Key::G) {
+                            self.interaction_mode = InteractionMode::Grab;
+                        }
+                        if i.key_pressed(Key::F) {
+                            self.fit_to_screen_with_viewport(viewport);
+                        }
+                    });
                 }
 
-                // Draw grab attractor cursor.
-                if let Some(world) = self.grab_world.filter(|_| self.grabbed_phys.is_some()) {
+                // ── Grab / PBD graph manipulation ─────────────────────────────────
+                if self.interaction_mode == InteractionMode::Grab {
                     let vp_center = viewport.center();
-                    let sx =
-                        (world[0] - self.grab_offset[0]) * self.zoom + self.pan.x + vp_center.x;
-                    let sy =
-                        (world[1] - self.grab_offset[1]) * self.zoom + self.pan.y + vp_center.y;
-                    let sp = Pos2::new(sx, sy);
-                    painter.circle_stroke(
-                        sp,
-                        12.0,
-                        egui::Stroke::new(2.0, Color32::from_rgb(255, 200, 50)),
-                    );
-                    painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 200, 50));
+                    let cursor_world = ctx.input(|i| i.pointer.hover_pos()).map(|cursor| {
+                        let wx = (cursor.x - vp_center.x - self.pan.x) / self.zoom;
+                        let wy = (cursor.y - vp_center.y - self.pan.y) / self.zoom;
+                        [wx, wy]
+                    });
+
+                    let just_pressed = response.drag_started_by(egui::PointerButton::Primary);
+                    let dragging = response.dragged_by(egui::PointerButton::Primary);
+                    let just_released = response.drag_stopped_by(egui::PointerButton::Primary);
+
+                    if just_pressed {
+                        self.finish_edit();
+                        let render_p = self.render_params();
+                        if let (
+                            Some(screen),
+                            LoadState::Loaded {
+                                view,
+                                layout_snapshot,
+                                ..
+                            },
+                        ) = (ctx.input(|i| i.pointer.press_origin()), &self.load_state)
+                        {
+                            let w = [
+                                (screen.x - vp_center.x - self.pan.x) / self.zoom,
+                                (screen.y - vp_center.y - self.pan.y) / self.zoom,
+                            ];
+                            self.grabbed_phys =
+                                hit_test_node(screen, viewport, view, layout_snapshot, &render_p)
+                                    .and_then(|ni| layout_snapshot.nearest_physics_point(ni, w));
+                            if let Some(pi) = self.grabbed_phys {
+                                let p = layout_snapshot.positions[pi];
+                                self.grab_offset = [p[0] - w[0], p[1] - w[1]];
+                            }
+                        }
+                    }
+
+                    if just_pressed && self.grabbed_phys.is_some() {
+                        self.begin_edit();
+                    }
+                    if dragging {
+                        if let Some(wpos) = cursor_world {
+                            self.grab_world = Some([
+                                wpos[0] + self.grab_offset[0],
+                                wpos[1] + self.grab_offset[1],
+                            ]);
+                        }
+                    } else if just_released {
+                        self.grabbed_phys = None;
+                        self.grab_world = None;
+                    }
+
+                    // Push (cursor_pos, grabbed_node) to layout runner.
+                    if let LoadState::Loaded {
+                        layout_runner,
+                        layout_snapshot,
+                        ..
+                    } = &mut self.load_state
+                    {
+                        let att = self.grab_world.zip(self.grabbed_phys);
+                        layout_runner.set_attractor(att);
+                        if let Some((pos, pi)) = att {
+                            Arc::make_mut(layout_snapshot).drag_preview_to(pos, pi);
+                        }
+                        if dragging {
+                            ctx.request_repaint();
+                        }
+                    }
+                } else {
+                    // Clear grab when mode switches.
+                    self.grabbed_phys = None;
+                    self.grab_world = None;
+                    if let LoadState::Loaded { layout_runner, .. } = &self.load_state {
+                        layout_runner.set_attractor(None);
+                    }
                 }
 
-                // Layout progress indicator.
+                // ── Draw ─────────────────────────────────────────────────────────
                 if let LoadState::Loaded {
-                    layout_runner,
+                    gfa,
+                    view,
                     layout_snapshot,
                     ..
                 } = &self.load_state
                 {
-                    if layout_runner.is_running() {
+                    let painter = ui.painter_at(viewport);
+                    // Background.
+                    painter.rect_filled(viewport, 0.0, self.display.theme.canvas_background());
+
+                    let rp = self.render_params();
+                    draw_graph(
+                        &painter,
+                        viewport,
+                        view,
+                        layout_snapshot,
+                        &self.selection,
+                        &rp,
+                    );
+
+                    draw_gfa_overlays(
+                        &painter,
+                        viewport,
+                        gfa,
+                        view,
+                        layout_snapshot,
+                        &rp,
+                        self.overlays.selected_path,
+                        self.overlays.selected_walk,
+                        self.overlays.show_containments,
+                    );
+
+                    // Rubber-band rect.
+                    if self.interaction_mode == InteractionMode::Select
+                        && let Some(start) = self.rubber_start
+                        && response.dragged_by(egui::PointerButton::Primary)
+                        && let Some(cur) = response.interact_pointer_pos()
+                    {
+                        let rect = Rect::from_two_pos(start, cur);
+                        painter.rect_stroke(
+                            rect,
+                            0.0,
+                            egui::Stroke::new(1.0, Color32::YELLOW),
+                            egui::StrokeKind::Inside,
+                        );
+                        painter.rect_filled(
+                            rect,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 100, 20),
+                        );
+                    }
+
+                    // Status overlay (mode indicator).
+                    painter.text(
+                        viewport.min + Vec2::new(8.0, 8.0),
+                        egui::Align2::LEFT_TOP,
+                        match self.interaction_mode {
+                            InteractionMode::Pan => "Mode: Pan  [P/S/G]",
+                            InteractionMode::Select => "Mode: Select  [P/S/G, F=fit]",
+                            InteractionMode::Grab => {
+                                "Mode: Grab  [P/S/G] — drag a contig to move it"
+                            }
+                        },
+                        egui::FontId::proportional(12.0),
+                        self.display.theme.canvas_foreground().gamma_multiply(0.8),
+                    );
+
+                    // Auto-fit once after load (do after layout is available).
+                    if self.pending_fit {
+                        self.fit_to_screen_with_viewport(viewport);
+                        self.pending_fit = false;
+                    }
+
+                    // Draw grab attractor cursor.
+                    if let Some(world) = self.grab_world.filter(|_| self.grabbed_phys.is_some()) {
+                        let vp_center = viewport.center();
+                        let sx =
+                            (world[0] - self.grab_offset[0]) * self.zoom + self.pan.x + vp_center.x;
+                        let sy =
+                            (world[1] - self.grab_offset[1]) * self.zoom + self.pan.y + vp_center.y;
+                        let sp = Pos2::new(sx, sy);
+                        painter.circle_stroke(
+                            sp,
+                            12.0,
+                            egui::Stroke::new(2.0, Color32::from_rgb(255, 200, 50)),
+                        );
+                        painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 200, 50));
+                    }
+
+                    // Layout progress indicator.
+                    if let LoadState::Loaded {
+                        layout_runner,
+                        layout_snapshot,
+                        ..
+                    } = &self.load_state
+                        && layout_runner.is_running()
+                    {
                         let iter = layout_snapshot.iteration;
                         ui.painter_at(viewport).text(
                             viewport.min + Vec2::new(8.0, 28.0),
@@ -1135,26 +1167,23 @@ impl GfaApp {
                         );
                     }
                 }
-            }
 
-            if let LoadState::Loaded {
-                layout_snapshot, ..
-            } = &self.load_state
-            {
-                if let Some(target) = draw_minimap(
-                    ui,
-                    viewport,
-                    layout_snapshot,
-                    self.zoom,
-                    self.pan,
-                    self.display.theme,
-                ) {
+                if let LoadState::Loaded {
+                    layout_snapshot, ..
+                } = &self.load_state
+                    && let Some(target) = draw_minimap(
+                        ui,
+                        viewport,
+                        layout_snapshot,
+                        self.zoom,
+                        self.pan,
+                        self.display.theme,
+                    )
+                {
                     self.pan = Vec2::new(-target[0] * self.zoom, -target[1] * self.zoom);
                     ctx.request_repaint();
                 }
-            }
-        });
-
+            });
     }
 
     fn render_params(&self) -> RenderParams {
@@ -1163,45 +1192,20 @@ impl GfaApp {
         let mut min_length = 1.0;
         let mut max_length = 100_000.0;
 
-        if let LoadState::Loaded { view, .. } = &self.load_state {
-            if self.display.auto_color_scale && self.display.color_mode == ColorMode::Depth {
-                let depths: Vec<f32> = view
-                    .nodes
-                    .iter()
-                    .filter_map(|n| n.depth)
-                    .map(|d| d as f32)
-                    .collect();
-                if !depths.is_empty() {
-                    let mn = depths.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let mx = depths.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    min_depth = mn;
-                    max_depth = if mx == mn { mn + 1.0 } else { mx };
-                }
-            } else if self.display.auto_color_scale
-                && self.display.color_mode == ColorMode::ReadCount
-            {
-                let rcs: Vec<f32> = view
-                    .nodes
-                    .iter()
-                    .filter_map(|n| n.read_count)
-                    .map(|rc| rc as f32)
-                    .collect();
-                if !rcs.is_empty() {
-                    let mn = rcs.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let mx = rcs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    min_depth = mn;
-                    max_depth = if mx == mn { mn + 1.0 } else { mx };
-                }
+        if self.display.auto_color_scale {
+            let range = match self.display.color_mode {
+                ColorMode::Depth => self.color_ranges.depth,
+                ColorMode::ReadCount => self.color_ranges.read_count,
+                _ => None,
+            };
+            if let Some((lo, hi)) = range {
+                min_depth = lo;
+                max_depth = hi;
             }
-
-            // Always calculate actual min/max lengths dynamically for the length scale!
-            let lengths: Vec<f32> = view.nodes.iter().map(|n| n.length as f32).collect();
-            if !lengths.is_empty() {
-                let mn = lengths.iter().cloned().fold(f32::INFINITY, f32::min);
-                let mx = lengths.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                min_length = mn;
-                max_length = if mx == mn { mn + 1.0 } else { mx };
-            }
+        }
+        if let Some((lo, hi)) = self.color_ranges.length {
+            min_length = lo;
+            max_length = hi;
         }
 
         RenderParams {
@@ -1222,8 +1226,7 @@ impl GfaApp {
     }
 
     fn fit_to_screen(&mut self) {
-        // Fit using a dummy viewport size.
-        self.fit_to_screen_with_viewport(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)));
+        self.pending_fit = true;
     }
 
     fn fit_to_screen_with_viewport(&mut self, viewport: Rect) {
@@ -1266,8 +1269,7 @@ impl GfaApp {
 
     fn focus_nodes_with_viewport(&mut self, nodes: &[usize], viewport: Rect) {
         let LoadState::Loaded {
-            layout_snapshot,
-            ..
+            layout_snapshot, ..
         } = &self.load_state
         else {
             return;
@@ -1337,9 +1339,10 @@ fn draw_minimap(
     let width = (max_x - min_x).max(1.0);
     let height = (max_y - min_y).max(1.0);
     let scale = (rect.width() / width).min(rect.height() / height) * 0.92;
-    let offset = rect.center()
-        - Vec2::new((min_x + max_x) * 0.5 * scale, (min_y + max_y) * 0.5 * scale);
-    let to_map = |point: [f32; 2]| Pos2::new(point[0] * scale + offset.x, point[1] * scale + offset.y);
+    let offset =
+        rect.center() - Vec2::new((min_x + max_x) * 0.5 * scale, (min_y + max_y) * 0.5 * scale);
+    let to_map =
+        |point: [f32; 2]| Pos2::new(point[0] * scale + offset.x, point[1] * scale + offset.y);
     let from_map = |point: Pos2| [(point.x - offset.x) / scale, (point.y - offset.y) / scale];
 
     let painter = ui.painter();
@@ -1360,7 +1363,11 @@ fn draw_minimap(
         egui::StrokeKind::Inside,
     );
     for &point in layout.positions.iter().step_by(step) {
-        painter.circle_filled(to_map(point), 0.7, theme.canvas_foreground().gamma_multiply(0.72));
+        painter.circle_filled(
+            to_map(point),
+            0.7,
+            theme.canvas_foreground().gamma_multiply(0.72),
+        );
     }
 
     let center = viewport.center();
@@ -1386,7 +1393,11 @@ fn draw_minimap(
         theme.canvas_foreground().gamma_multiply(0.8),
     );
 
-    let response = ui.interact(rect, ui.id().with("assembly_minimap"), egui::Sense::click_and_drag());
+    let response = ui.interact(
+        rect,
+        ui.id().with("assembly_minimap"),
+        egui::Sense::click_and_drag(),
+    );
     if (response.clicked() || response.dragged()) && response.interact_pointer_pos().is_some() {
         return response.interact_pointer_pos().map(from_map);
     }
@@ -1396,20 +1407,30 @@ fn draw_minimap(
 // ── eframe::App ───────────────────────────────────────────────────────────────
 
 impl eframe::App for GfaApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.preferences.display = self.display.clone();
+        eframe::set_value(storage, "graphite.preferences.v1", &self.preferences);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.check_loading(&ctx);
+        self.poll_workflows(&ctx);
         self.top_menu(ui);
         self.left_panels(ui);
         self.right_panel(ui);
         self.canvas(ui);
+        self.diagnostics_window(&ctx);
 
         // eframe/egui exposes the platform copy gesture as Event::Copy.
         // Keep the key check as a native fallback, but don't rely on it alone:
         // some integrations handle Ctrl/Cmd+C semantically and may not leave a
         // normal Key::C press for application-level shortcut code.
         let copy_shortcut = ctx.input(|input| {
-            input.events.iter().any(|event| matches!(event, egui::Event::Copy))
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Copy))
                 || (input.modifiers.command && input.key_pressed(Key::C))
         });
         if copy_shortcut && !ctx.text_edit_focused() {
@@ -1422,32 +1443,15 @@ impl eframe::App for GfaApp {
             layout_snapshot,
             ..
         } = &self.load_state
+            && layout_runner.is_running()
+            && !layout_snapshot.converged
         {
-            if layout_runner.is_running() && !layout_snapshot.converged {
-                let repaint_interval = if self.remote_ui {
-                    Duration::from_millis(100)
-                } else {
-                    Duration::from_millis(16)
-                };
-                ctx.request_repaint_after(repaint_interval);
-            }
-        }
-    }
-}
-
-// ── Helper trait: clone-able ViewGraph for layout thread ──────────────────────
-
-trait RebuildClone {
-    fn rebuild_clone(&self) -> Self;
-}
-
-impl RebuildClone for ViewGraph {
-    fn rebuild_clone(&self) -> Self {
-        Self {
-            nodes: self.nodes.clone(),
-            edges: self.edges.clone(),
-            seg_to_node: self.seg_to_node.clone(),
-            components: self.components.clone(),
+            let repaint_interval = if self.remote_ui {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_millis(16)
+            };
+            ctx.request_repaint_after(repaint_interval);
         }
     }
 }

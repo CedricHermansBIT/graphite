@@ -1,8 +1,9 @@
 //! Filtering: which segments appear in the view graph.
 
 use crate::gfa::Segment;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ColorMode {
     Depth,
     Length,
@@ -21,7 +22,7 @@ impl ColorMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComponentTopology {
     All,
     Circular,
@@ -29,7 +30,7 @@ pub enum ComponentTopology {
     Branched,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComponentSort {
     SegmentCount,
     TotalLength,
@@ -48,7 +49,7 @@ impl ComponentSort {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComponentSortOrder {
     Descending,
     Ascending,
@@ -74,7 +75,8 @@ impl ComponentTopology {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
 pub struct FilterParams {
     /// Minimum sequence length to show (bp).
     pub min_length: usize,
@@ -124,27 +126,35 @@ impl FilterParams {
         if seg.length < self.min_length {
             return false;
         }
-        if let Some(max_l) = self.max_length {
-            if seg.length > max_l {
+        if let Some(max_l) = self.max_length
+            && seg.length > max_l
+        {
+            return false;
+        }
+        if let Some(d) = seg.depth {
+            if let Some(min_d) = self.min_depth
+                && d < min_d
+            {
+                return false;
+            }
+            if let Some(max_d) = self.max_depth
+                && d > max_d
+            {
                 return false;
             }
         }
-        if let Some(d) = seg.depth {
-            if let Some(min_d) = self.min_depth {
-                if d < min_d {
-                    return false;
-                }
-            }
-            if let Some(max_d) = self.max_depth {
-                if d > max_d {
-                    return false;
-                }
-            }
-        }
         if !self.name_contains.is_empty() {
-            let name_lower = seg.name.to_lowercase();
-            let filter_lower = self.name_contains.to_lowercase();
-            if !name_lower.contains(&filter_lower) {
+            let matches = if seg.name.is_ascii() && self.name_contains.is_ascii() {
+                seg.name
+                    .as_bytes()
+                    .windows(self.name_contains.len())
+                    .any(|window| window.eq_ignore_ascii_case(self.name_contains.as_bytes()))
+            } else {
+                seg.name
+                    .to_lowercase()
+                    .contains(&self.name_contains.to_lowercase())
+            };
+            if !matches {
                 return false;
             }
         }
