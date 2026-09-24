@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a crash, incorrect graph, export problem or installation issue
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include what you expected and the steps needed to reproduce it.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Graphite version or commit
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Operating system and installation method
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction data and diagnostics
+      description: A small shareable GFA example, parser warnings, logs or a screenshot. Do not upload confidential sequences.
+  - type: textarea
+    attributes:
+      label: Performance details (if applicable)
+      description: Graph size, CPU/RAM, backend, and whether the issue is loading, layout, interaction or export.

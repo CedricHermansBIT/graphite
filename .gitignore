@@ -1,4 +1,12 @@
 /target
+/dist/
+/vendor/
+*.AppImage
+*.AppImage.zip
+*_AppImage.zip
+/benchmarks/results-rust/
+/benchmarks/results-rust-fmmm/
+/benchmarks/real_datasets.json
 /benchmarks/data/
 /benchmarks/data-seq/
 /benchmarks/results/
@@ -7,4 +15,3 @@
 /tests/compatibility/data/
 /tests/compatibility/results/
 /tests/compatibility/datasets.lock.json
-

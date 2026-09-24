@@ -6,6 +6,8 @@
 
 Graphite is a fast desktop viewer for large assembly graphs. It is designed around memory-mapped parsing, compact graph structures, asynchronous layout and level-of-detail rendering so navigation remains practical as assemblies grow.
 
+![Graphite desktop showing the example assembly graph](assets/screenshot.png)
+
 Graphite uses its Graphite-specific multilevel Rust implementation as the default initial-layout backend for connected, non-circular components. The bundled Bandage/OGDF FMMM implementation remains available as a reference backend for validation and benchmarking. Circular components are arranged as rings and components are packed with spacing so they do not overlap.
 
 ## Highlights
@@ -23,6 +25,11 @@ Graphite uses its Graphite-specific multilevel Rust implementation as the defaul
 - Graphite, Midnight, Light, and Paper interface themes under **Settings → Theme**.
 - Selectable GFA path and haplotype-walk overlays, plus internal-position containment visualization.
 - SVG and PNG figure export using the selected UI theme and active GFA overlays.
+- Plain or gzip-compressed GFA loading with cancellation, stage progress, and visible parser diagnostics.
+- Saved sessions with verified source identity, remembered appearance, recent files, and drag-and-drop opening.
+- Undo/redo for manual movement, plus background exports with configurable size and viewport cropping.
+
+Try the synthetic [`examples/example.gfa`](examples/example.gfa), or choose **File → Open example graph…** to save and open a copy.
 
 ## GFA support
 
@@ -46,7 +53,8 @@ GFA2 `S/E/F/G/O/U` records are not implemented yet.
 
 ## Requirements
 
-- Rust stable with Rust 2024 edition support (Rust 1.85 or newer). Update with `rustup update stable`.
+- Python 3.11 or newer for development, compatibility, and packaging scripts.
+- Rust 1.95 or newer (required by egui/eframe). Update with `rustup update stable`.
 - The default Rust-only build does **not** require the Bandage submodule or a C++ compiler.
 - The optional Bandage/OGDF reference backend requires the `Bandage` submodule and a C++14 compiler.
 
@@ -64,6 +72,16 @@ cargo build --release
 ```
 
 The file argument is optional: without it, use **File → Open GFA…**.
+
+The file argument and drag-and-drop also accept `.gfa.gz` and `.graphite.json`
+sessions. Run `graphite --version` to include the version in a bug report.
+
+The release workflow prepares archives for Linux x86-64, Windows x86-64, and
+macOS Apple Silicon, with checksums, licenses, a sample graph, and a matching
+source archive. Download them from [Releases](https://github.com/CedricHermansBIT/graphite/releases)
+when available; these are portable executables, not installers. Windows and macOS
+packages are currently unsigned. Builds and tests for each platform run in CI;
+the release draft should be reviewed and the GUI tried on each target before publication.
 
 The Rust backend is the default and is the only backend in a normal build.
 
@@ -103,6 +121,9 @@ cargo xwin build --release --features ogdf --target x86_64-pc-windows-msvc
 ```
 
 For the OGDF-enabled target, `build.rs` supplies an `llvm-lib` compatibility wrapper for `cargo-xwin`, so a separately installed `llvm-lib` is not required.
+
+The standalone source release already includes the pinned Bandage submodule
+and vendored Rust dependencies, so it can build the optional backend offline.
 
 ## Benchmarking
 
@@ -160,8 +181,41 @@ The corpus includes commit-pinned Bandage/vg fixtures and real assembler-produce
 | Select path/walk segments | Select it in **GFA overlays**, then click **Select segments** |
 | Navigate the overview | Click or drag in the minimap |
 | Copy selected sequence(s) | `Ctrl+C` or **Copy sequence** |
+| Undo movement | `Ctrl+Z` / `Cmd+Z` or **Edit → Undo movement** |
+| Redo movement | `Ctrl+Shift+Z` / `Cmd+Shift+Z` or **Edit → Redo movement** |
 
 `Ctrl+C` leaves ordinary text copying alone while a text field is focused. For one selected segment it copies a single FASTA record; for multiple selected segments it copies one FASTA record per segment. Segments without embedded sequence are skipped. When a `.noseq.gfa` file is loaded, sequence copy and FASTA export controls are disabled and explain why.
+
+Mode/fit and undo shortcuts also leave text editing alone. Movement history is
+limited to 20 actions and 64 MiB, and resets when a graph or filter is loaded.
+
+## Loading, diagnostics, and sessions
+
+Loading runs in the background and reports parsing, statistics, filtering, and
+layout stages. **Cancel loading** restores the previous graph; an unsuccessful
+load also keeps it available. Rust parsing, decompression, and initial layout
+cooperate with cancellation. A currently executing native OGDF call cannot be
+interrupted and finishes in the background after cancellation.
+
+Empty sequence fields used by some myloasm exports are treated as missing
+sequences with a warning. Malformed supported records and unresolved references appear in a diagnostics
+window with line numbers. Duplicate segment names are rejected because their
+references are ambiguous. **Settings → Reject graphs with parser warnings**
+enables strict loading; leave it off to inspect partially valid graphs. Diagnostic
+storage is bounded to 1,000 entries plus a suppression message. Producer-specific
+unsupported record types are ignored. GFA2 remains unsupported.
+
+Gzip is detected from its contents and decompressed to a temporary file, which
+is then memory-mapped. It requires temporary disk space for the decompressed
+input and currently permits at most 64 GiB of decompressed data.
+
+**File → Save session…** records layout coordinates, filters, selection, overlays,
+appearance and viewport. **File → Open session…** restores them without rerunning
+the layout solver. Sessions reference the original GFA; they do not embed its
+sequences. Keep that file at its recorded path. A SHA-256 check rejects changed
+source contents; incompatible geometry or session versions are also rejected.
+Sessions are limited to 512 MiB. Closing the window remembers appearance and
+recent file paths separately; it does not automatically save a graph session.
 
 ## Filters, display, and components
 
@@ -179,11 +233,44 @@ The right sidebar contains the paged Components browser and selected-segment det
 The top-level **Export** menu provides all output formats in one place:
 
 - **Figure as SVG…** creates a scalable vector graph figure.
-- **Figure as PNG (2400 × 1600)…** creates a raster graph figure.
+- **Figure as PNG…** creates a raster graph figure.
 - **Selected segments as FASTA…** exports every selected segment with embedded sequence.
 - **Graph statistics as CSV…** exports selected segments, or the full current graph when nothing is selected.
 
 SVG and PNG exports use the active graph colours, UI theme background and active GFA overlays, making them suitable starting points for publication figures.
+
+Set dimensions in the Export menu (2400 × 1600 by default), and choose whether
+to export the whole filtered graph or the current viewport. Both figure formats
+include labels when enabled for views with at most 2,000 segments, segment
+direction indicators, and the selected segment thickness. They render the graph,
+not the interface controls or selection highlight. The viewport crop preserves
+aspect ratio, adding background margins if the chosen dimensions differ.
+
+Exports run in the background from a stable snapshot and replace the destination
+only after writing succeeds. The loaded source file cannot be used as an output.
+Figure sizes are limited to 64–16,384 pixels per side and 64 million pixels total.
+An export already in progress must finish before the application closes.
+
+## Development and release
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and [CHANGELOG.md](CHANGELOG.md)
+for changes. CI covers formatting, Clippy, tests, builds, the minimum Rust version,
+the optional OGDF backend, and a small public compatibility corpus.
+
+`python3 benchmarks/benchmark_packing.py` compares the production skyline packer
+against its exhaustive reference and verifies identical placements. This measures
+the packing search only, not total graph-loading performance.
+
+`python3 scripts/package_release.py --binary target/release/graphite` prepares a
+local binary archive. `python3 scripts/package_release.py --source` packages the
+matching sources with vendored dependencies for `cargo build --release --locked
+--offline`. The tag workflow creates a draft release with all platform archives
+and the source bundle; it does not publish the draft automatically.
+
+Graphite is licensed under [GPLv3](LICENSE). This permits reuse and commercial
+distribution under its terms, including source-sharing requirements; it is not a
+noncommercial license. See [THIRD_PARTY.md](THIRD_PARTY.md) for bundled code and
+dependency notices.
 
 ## Project structure
 
@@ -200,6 +287,9 @@ src/
   selection.rs  selection and rubber-band logic
   export.rs     FASTA, CSV, SVG, and PNG export
   ui.rs         filter, display, component, stats, and selection UI
+  tasks.rs      cancellable background graph preparation
+  session.rs    versioned sessions and preference data
+  history.rs    bounded movement undo/redo
 native/
   bandage_layout.cpp  bridge to bundled Bandage OGDF layout code
 Bandage/
