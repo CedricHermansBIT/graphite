@@ -385,10 +385,17 @@ fn solve_multilevel(
     // postprocessing. It untwists simple equal-length split/merge bubbles.
     fix_twisted_splits(&levels[0], &mut positions);
 
-    // FMMM postprocessing: ten cooler normal-force iterations, rescale to the
-    // requested average ideal edge length, then low-repulsion/high-spring fine
-    // tuning and a final rescale.
-    run_force_iterations(&levels[0], &mut positions, 10, ForcePhase::Post, cancel)?;
+    // Large graphs already receive fewer normal iterations. Limit the costly
+    // full-resolution post phase too, while retaining the original ten
+    // iterations for smaller graphs where they are inexpensive.
+    let post_iterations = if node_count > 50_000 { 5 } else { 10 };
+    run_force_iterations(
+        &levels[0],
+        &mut positions,
+        post_iterations,
+        ForcePhase::Post,
+        cancel,
+    )?;
     rescale_to_ideal_edge_length(&levels[0], &mut positions);
 
     if fine_tuning_iterations > 0 {
