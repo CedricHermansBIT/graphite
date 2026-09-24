@@ -17,6 +17,9 @@ const COARSE_TARGET: usize = 50;
 const EXACT_REPULSION_LIMIT: usize = 175;
 const MAX_LEVELS: usize = 30;
 const THETA: f32 = 0.72;
+const MORTON_BITS: usize = 28;
+const LEAF_CAPACITY: usize = 8;
+const DIRECT_LEAF_LIMIT: u32 = 32;
 const EPSILON: f32 = 1.0e-5;
 const FORCE_SCALING: f32 = 0.05;
 const WAGGLE_FACTOR: f32 = 0.05;
@@ -1091,24 +1094,26 @@ struct QuadNode {
     half: f32,
     charge: f32,
     center_of_charge: Pos2,
-    point: i32,
+    first: u32,
+    end: u32,
     children: [i32; 4],
 }
 
 impl QuadNode {
-    fn empty(center: Pos2, half: f32) -> Self {
+    fn empty(center: Pos2, half: f32, first: usize, end: usize) -> Self {
         Self {
             center,
             half,
             charge: 0.0,
             center_of_charge: [0.0, 0.0],
-            point: -1,
+            first: first as u32,
+            end: end as u32,
             children: [-1; 4],
         }
     }
 
     fn is_leaf(&self) -> bool {
-        self.children[0] < 0
+        self.children == [-1; 4]
     }
 
     fn contains(&self, point: Pos2) -> bool {
@@ -1117,9 +1122,16 @@ impl QuadNode {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MortonPoint {
+    code: u64,
+    index: u32,
+}
+
 #[derive(Default)]
 struct BarnesHutTree {
     nodes: Vec<QuadNode>,
+    ordered: Vec<MortonPoint>,
     box_length: f32,
 }
 
@@ -1141,155 +1153,143 @@ impl BarnesHutTree {
         };
         let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
         let half = (span * 0.5).max(1.0) * 1.0001;
-
-        self.nodes.clear();
-        self.nodes.push(QuadNode::empty(center, half));
-        if positions.len() >= 100_000 && rayon::current_num_threads() > 1 {
-            return self.rebuild_parallel(positions, cancel);
-        }
-        for point in 0..positions.len() {
-            if point & 1023 == 0 {
-                check_cancel(cancel)?;
-            }
-            Self::insert(&mut self.nodes, 0, point, positions, 0);
-        }
-        Ok(())
-    }
-
-    fn rebuild_parallel(
-        &mut self,
-        positions: &[Pos2],
-        cancel: &AtomicBool,
-    ) -> Result<(), &'static str> {
-        let mut quadrants: [Vec<usize>; 4] = std::array::from_fn(|_| Vec::new());
-        let root_center = self.nodes[0].center;
-        for (index, &point) in positions.iter().enumerate() {
-            if index & 1023 == 0 {
-                check_cancel(cancel)?;
-            }
-            let root = &mut self.nodes[0];
-            let new_charge = root.charge + 1.0;
-            root.center_of_charge[0] =
-                (root.center_of_charge[0] * root.charge + point[0]) / new_charge;
-            root.center_of_charge[1] =
-                (root.center_of_charge[1] * root.charge + point[1]) / new_charge;
-            root.charge = new_charge;
-            let quadrant = usize::from(point[0] >= root_center[0])
-                + 2 * usize::from(point[1] >= root_center[1]);
-            quadrants[quadrant].push(index);
-        }
-        Self::subdivide(&mut self.nodes, 0);
-        self.nodes[0].point = -2;
-        let child_roots: [QuadNode; 4] = std::array::from_fn(|q| self.nodes[q + 1]);
-        let subtrees = quadrants
-            .into_par_iter()
-            .enumerate()
-            .map(|(quadrant, indices)| {
-                let mut nodes = vec![child_roots[quadrant]];
-                for (ordinal, index) in indices.into_iter().enumerate() {
-                    if ordinal & 1023 == 0 {
-                        check_cancel(cancel)?;
-                    }
-                    Self::insert(&mut nodes, 0, index, positions, 1);
-                }
-                Ok(nodes)
-            })
-            .collect::<Result<Vec<_>, &'static str>>()?;
-
-        for (quadrant, subtree) in subtrees.into_iter().enumerate() {
-            let base = self.nodes.len();
-            for (local, mut node) in subtree.into_iter().enumerate() {
-                for child in &mut node.children {
-                    if *child >= 0 {
-                        *child = (base + *child as usize - 1) as i32;
-                    }
-                }
-                if local == 0 {
-                    self.nodes[quadrant + 1] = node;
-                } else {
-                    self.nodes.push(node);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn insert(
-        nodes: &mut Vec<QuadNode>,
-        node_index: usize,
-        point_index: usize,
-        positions: &[Pos2],
-        depth: usize,
-    ) {
-        let point = positions[point_index];
-
-        {
-            let node = &mut nodes[node_index];
-            let new_charge = node.charge + 1.0;
-            node.center_of_charge[0] =
-                (node.center_of_charge[0] * node.charge + point[0]) / new_charge;
-            node.center_of_charge[1] =
-                (node.center_of_charge[1] * node.charge + point[1]) / new_charge;
-            node.charge = new_charge;
-        }
-
-        let is_leaf = nodes[node_index].is_leaf();
-        let existing = nodes[node_index].point;
-
-        if is_leaf && existing == -1 {
-            nodes[node_index].point = point_index as i32;
-            return;
-        }
-
-        if is_leaf && (depth >= 28 || nodes[node_index].half <= EPSILON) {
-            nodes[node_index].point = -2;
-            return;
-        }
-
-        if is_leaf {
-            Self::subdivide(nodes, node_index);
-            nodes[node_index].point = -2;
-            if existing >= 0 {
-                let old = existing as usize;
-                let child = Self::child_index(nodes, node_index, positions[old]);
-                Self::insert(nodes, child, old, positions, depth + 1);
-            }
-        }
-
-        let child = Self::child_index(nodes, node_index, point);
-        Self::insert(nodes, child, point_index, positions, depth + 1);
-    }
-
-    fn subdivide(nodes: &mut Vec<QuadNode>, node_index: usize) {
-        let node = nodes[node_index];
-        let child_half = node.half * 0.5;
-        let first = nodes.len();
-
-        for quadrant in 0..4 {
-            let x = if quadrant & 1 == 0 { -1.0 } else { 1.0 };
-            let y = if quadrant & 2 == 0 { -1.0 } else { 1.0 };
-            nodes.push(QuadNode::empty(
-                [
-                    node.center[0] + x * child_half,
-                    node.center[1] + y * child_half,
-                ],
-                child_half,
-            ));
-        }
-
-        nodes[node_index].children = [
-            first as i32,
-            (first + 1) as i32,
-            (first + 2) as i32,
-            (first + 3) as i32,
+        let side = 2.0 * half as f64;
+        let low = [
+            center[0] as f64 - half as f64,
+            center[1] as f64 - half as f64,
         ];
+        const GRID: f64 = (1u64 << MORTON_BITS) as f64;
+        self.ordered
+            .resize(positions.len(), MortonPoint { code: 0, index: 0 });
+        self.ordered
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, out)| {
+                let point = positions[index];
+                let x = (((point[0] as f64 - low[0]) * GRID / side).floor() as i64)
+                    .clamp(0, GRID as i64 - 1) as u32;
+                let y = (((point[1] as f64 - low[1]) * GRID / side).floor() as i64)
+                    .clamp(0, GRID as i64 - 1) as u32;
+                *out = MortonPoint {
+                    code: Self::spread_bits(x) | (Self::spread_bits(y) << 1),
+                    index: index as u32,
+                };
+            });
+        check_cancel(cancel)?;
+        // A unique tie-breaker gives identical tree structure at every thread count.
+        self.ordered
+            .par_sort_unstable_by_key(|point| (point.code, point.index));
+        check_cancel(cancel)?;
+        self.nodes.clear();
+        Self::build_range(
+            &mut self.nodes,
+            &self.ordered,
+            positions,
+            0,
+            positions.len(),
+            0,
+            center,
+            half,
+            cancel,
+        )?;
+        Ok(())
     }
 
-    fn child_index(nodes: &[QuadNode], node_index: usize, point: Pos2) -> usize {
-        let node = nodes[node_index];
-        let x = usize::from(point[0] >= node.center[0]);
-        let y = usize::from(point[1] >= node.center[1]) * 2;
-        node.children[x + y] as usize
+    fn spread_bits(value: u32) -> u64 {
+        let mut bits = value as u64;
+        bits = (bits | bits << 16) & 0x0000_ffff_0000_ffff;
+        bits = (bits | bits << 8) & 0x00ff_00ff_00ff_00ff;
+        bits = (bits | bits << 4) & 0x0f0f_0f0f_0f0f_0f0f;
+        bits = (bits | bits << 2) & 0x3333_3333_3333_3333;
+        bits = (bits | bits << 1) & 0x5555_5555_5555_5555;
+        bits
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_range(
+        nodes: &mut Vec<QuadNode>,
+        ordered: &[MortonPoint],
+        positions: &[Pos2],
+        first: usize,
+        end: usize,
+        depth: usize,
+        center: Pos2,
+        half: f32,
+        cancel: &AtomicBool,
+    ) -> Result<i32, &'static str> {
+        if nodes.len() & 1023 == 0 {
+            check_cancel(cancel)?;
+        }
+        let node_index = nodes.len();
+        let mut node = QuadNode::empty(center, half, first, end);
+        nodes.push(node);
+        if end - first <= LEAF_CAPACITY || depth == MORTON_BITS || half <= EPSILON {
+            let mut sum = [0.0f64; 2];
+            for point in &ordered[first..end] {
+                let position = positions[point.index as usize];
+                sum[0] += position[0] as f64;
+                sum[1] += position[1] as f64;
+            }
+            node.charge = (end - first) as f32;
+            node.center_of_charge = [
+                (sum[0] / node.charge as f64) as f32,
+                (sum[1] / node.charge as f64) as f32,
+            ];
+        } else {
+            let child_half = half * 0.5;
+            let mut cursor = first;
+            for quadrant in 0..4 {
+                let start = cursor;
+                while cursor < end
+                    && ((ordered[cursor].code >> (2 * (MORTON_BITS - 1 - depth))) & 3)
+                        == quadrant as u64
+                {
+                    cursor += 1;
+                }
+                if start == cursor {
+                    continue;
+                }
+                let child_center = [
+                    center[0]
+                        + if quadrant & 1 == 0 {
+                            -child_half
+                        } else {
+                            child_half
+                        },
+                    center[1]
+                        + if quadrant & 2 == 0 {
+                            -child_half
+                        } else {
+                            child_half
+                        },
+                ];
+                let child = Self::build_range(
+                    nodes,
+                    ordered,
+                    positions,
+                    start,
+                    cursor,
+                    depth + 1,
+                    child_center,
+                    child_half,
+                    cancel,
+                )?;
+                node.children[quadrant] = child;
+            }
+            let mut sum = [0.0f64; 2];
+            for child in node.children.into_iter().filter(|&child| child >= 0) {
+                let part = nodes[child as usize];
+                node.charge += part.charge;
+                sum[0] += part.center_of_charge[0] as f64 * part.charge as f64;
+                sum[1] += part.center_of_charge[1] as f64 * part.charge as f64;
+            }
+            node.center_of_charge = [
+                (sum[0] / node.charge as f64) as f32,
+                (sum[1] / node.charge as f64) as f32,
+            ];
+        }
+        nodes[node_index] = node;
+        Ok(node_index as i32)
     }
 
     fn repulsion(&self, target: usize, positions: &[Pos2], theta: f32) -> Pos2 {
@@ -1311,27 +1311,33 @@ impl BarnesHutTree {
         let target_point = positions[target];
 
         if node.is_leaf() {
-            if node.point == target as i32 {
-                return [0.0, 0.0];
+            if node.end - node.first <= DIRECT_LEAF_LIMIT {
+                let mut force = [0.0, 0.0];
+                for point in &self.ordered[node.first as usize..node.end as usize] {
+                    if point.index as usize != target {
+                        let pair =
+                            repulsive_force(target_point, positions[point.index as usize], 1.0);
+                        force[0] += pair[0];
+                        force[1] += pair[1];
+                    }
+                }
+                return force;
             }
-            if node.point >= 0 {
-                return repulsive_force(target_point, node.center_of_charge, 1.0);
-            }
-
+            // At maximum depth, many coincident particles can share one code.
+            // Avoid quadratic work while excluding the target's own charge.
             let mut charge = node.charge;
-            let mut center = node.center_of_charge;
+            let mut source = node.center_of_charge;
             if node.contains(target_point) {
-                let remaining = charge - 1.0;
-                if remaining <= EPSILON {
+                charge -= 1.0;
+                if charge <= EPSILON {
                     return [0.0, 0.0];
                 }
-                center = [
-                    (center[0] * charge - target_point[0]) / remaining,
-                    (center[1] * charge - target_point[1]) / remaining,
+                source = [
+                    (source[0] * node.charge - target_point[0]) / charge,
+                    (source[1] * node.charge - target_point[1]) / charge,
                 ];
-                charge = remaining;
             }
-            return repulsive_force(target_point, center, charge);
+            return repulsive_force(target_point, source, charge);
         }
 
         let dx = target_point[0] - node.center_of_charge[0];
@@ -1558,5 +1564,44 @@ mod tests {
                 parallel.repulsion(target, &positions, THETA)
             );
         }
+    }
+
+    #[test]
+    fn morton_tree_matches_direct_repulsion_without_approximation() {
+        let mut positions = deterministic_random_seed(513, 100.0, 91);
+        positions[17] = positions[18];
+        let mut tree = BarnesHutTree::default();
+        tree.rebuild(&positions, &AtomicBool::new(false)).unwrap();
+        assert_eq!(tree.nodes[0].charge, positions.len() as f32);
+        assert!(
+            tree.ordered
+                .windows(2)
+                .all(|pair| { (pair[0].code, pair[0].index) <= (pair[1].code, pair[1].index) })
+        );
+        for target in (0..positions.len()).step_by(11) {
+            let mut direct = [0.0, 0.0];
+            for source in 0..positions.len() {
+                if source != target {
+                    let force = repulsive_force(positions[target], positions[source], 1.0);
+                    direct[0] += force[0];
+                    direct[1] += force[1];
+                }
+            }
+            let tree_force = tree.repulsion(target, &positions, 0.0);
+            for axis in 0..2 {
+                let tolerance = 0.0005 * direct[axis].abs().max(1.0);
+                assert!((tree_force[axis] - direct[axis]).abs() < tolerance);
+            }
+        }
+    }
+
+    #[test]
+    fn morton_tree_handles_many_coincident_particles() {
+        let positions = vec![[17.0, -9.0]; 10_000];
+        let mut tree = BarnesHutTree::default();
+        tree.rebuild(&positions, &AtomicBool::new(false)).unwrap();
+        assert!(tree.nodes.len() <= MORTON_BITS + 1);
+        assert_eq!(tree.nodes[0].charge, 10_000.0);
+        assert_eq!(tree.repulsion(0, &positions, THETA), [0.0, 0.0]);
     }
 }
