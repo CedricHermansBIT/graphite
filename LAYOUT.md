@@ -87,6 +87,26 @@ after manual placement, so manually placed components may overlap. Overview
 rendering culls offscreen edges, merges indistinguishable dots, and draws visible
 contigs as single polylines.
 
+## Packing performance and cancellation
+
+The skyline search minimizes the required vertical placement, with the original
+leftmost tie-break. For a fixed shape, minimizing `(resulting height, y, x)` is
+equivalent to minimizing `(y, x)`. Graphite therefore avoids rescanning the top
+profile for every candidate, stops a candidate scan once it cannot beat the best
+height, and stops the search when it finds a zero-height placement. Components
+remain in display order, and tests compare every placement with the exhaustive
+reference and check that occupied envelopes do not overlap.
+
+Run `python3 benchmarks/benchmark_packing.py` for the isolated packing comparison
+at 1,000, 10,000 and 50,000 synthetic profiles. The benchmark checks exact placement
+equality and reports median timings; these are not whole-application speedups.
+
+Rust initialization and packing check a shared cancellation flag. The optional
+native backend checks before and after the OGDF call, which itself is blocking.
+Saved sessions rebuild interaction constraints directly from validated positions,
+skipping the initial solver and packing. Restored and manually positioned layouts
+stay settled until the next drag.
+
 ## Remote UI mode
 
 For X11 forwarding over SSH, use `--remote-ui` to reduce continuous layout traffic without slowing the layout solver itself:

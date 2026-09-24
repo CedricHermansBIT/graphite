@@ -1,6 +1,15 @@
 use ahash::AHashMap;
 use rayon::prelude::*;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+fn check_cancel(cancel: &AtomicBool) -> Result<(), &'static str> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("Layout cancelled")
+    } else {
+        Ok(())
+    }
+}
 
 pub type Pos2 = [f32; 2];
 
@@ -108,6 +117,7 @@ impl Adjacency {
 /// Graphite-specific Rust implementation of the important FM^3 ideas used by
 /// Bandage/OGDF. Long-range repulsion is Barnes-Hut rather than OGDF's NMM,
 /// while the multilevel hierarchy follows the solar-system strategy.
+#[cfg(test)]
 pub fn initial_layout(
     node_count: usize,
     from: &[u32],
@@ -116,6 +126,27 @@ pub fn initial_layout(
     initial_positions: &[Pos2],
     output: &mut [Pos2],
 ) -> Result<(), &'static str> {
+    initial_layout_cancellable(
+        node_count,
+        from,
+        to,
+        lengths,
+        initial_positions,
+        output,
+        &AtomicBool::new(false),
+    )
+}
+
+pub fn initial_layout_cancellable(
+    node_count: usize,
+    from: &[u32],
+    to: &[u32],
+    lengths: &[f32],
+    initial_positions: &[Pos2],
+    output: &mut [Pos2],
+    cancel: &AtomicBool,
+) -> Result<(), &'static str> {
+    check_cancel(cancel)?;
     if from.len() != to.len()
         || from.len() != lengths.len()
         || initial_positions.len() != node_count
@@ -129,13 +160,14 @@ pub fn initial_layout(
 
     // FMMM starts from a simple loop-free graph. Parallel/reversed edges are
     // collapsed and their ideal lengths are averaged.
-    let edges = simplify_edges(node_count, from, to, lengths)?;
-    let components = split_components(node_count, &edges);
+    let edges = simplify_edges(node_count, from, to, lengths, cancel)?;
+    let components = split_components(node_count, &edges, cancel)?;
 
     let solved: Vec<ComponentResult> = components
         .into_par_iter()
-        .map(solve_component)
-        .collect();
+        .map(|work| solve_component(work, cancel))
+        .collect::<Result<_, _>>()?;
+    check_cancel(cancel)?;
 
     for result in solved {
         for (local, global) in result.global_nodes.into_iter().enumerate() {
@@ -155,9 +187,13 @@ fn simplify_edges(
     from: &[u32],
     to: &[u32],
     lengths: &[f32],
+    cancel: &AtomicBool,
 ) -> Result<Vec<Edge>, &'static str> {
     let mut merged: AHashMap<(u32, u32), (f64, u32)> = AHashMap::new();
-    for ((&a, &b), &desired) in from.iter().zip(to).zip(lengths) {
+    for (index, ((&a, &b), &desired)) in from.iter().zip(to).zip(lengths).enumerate() {
+        if index & 1023 == 0 {
+            check_cancel(cancel)?;
+        }
         if a as usize >= node_count || b as usize >= node_count {
             return Err("layout edge endpoint is out of range");
         }
@@ -182,7 +218,12 @@ fn simplify_edges(
     Ok(edges)
 }
 
-fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
+fn split_components(
+    node_count: usize,
+    edges: &[Edge],
+    cancel: &AtomicBool,
+) -> Result<Vec<ComponentWork>, &'static str> {
+    check_cancel(cancel)?;
     let mut dsu = DisjointSet::new(node_count);
     for edge in edges {
         dsu.union(edge.a as usize, edge.b as usize);
@@ -192,7 +233,10 @@ fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
     let mut global_nodes: Vec<Vec<usize>> = Vec::new();
     let mut node_component = vec![0usize; node_count];
 
-    for node in 0..node_count {
+    for (node, node_component) in node_component.iter_mut().enumerate() {
+        if node & 1023 == 0 {
+            check_cancel(cancel)?;
+        }
         let root = dsu.find(node);
         let component = match root_to_component.get(&root).copied() {
             Some(component) => component,
@@ -203,7 +247,7 @@ fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
                 component
             }
         };
-        node_component[node] = component;
+        *node_component = component;
         global_nodes[component].push(node);
     }
 
@@ -225,17 +269,21 @@ fn split_components(node_count: usize, edges: &[Edge]) -> Vec<ComponentWork> {
         });
     }
 
-    global_nodes
+    Ok(global_nodes
         .into_iter()
         .zip(component_edges)
         .map(|(global_nodes, edges)| ComponentWork {
             global_nodes,
             edges,
         })
-        .collect()
+        .collect())
 }
 
-fn solve_component(work: ComponentWork) -> ComponentResult {
+fn solve_component(
+    work: ComponentWork,
+    cancel: &AtomicBool,
+) -> Result<ComponentResult, &'static str> {
+    check_cancel(cancel)?;
     let node_count = work.global_nodes.len();
     // Keep runs reproducible while ensuring isomorphic components do not all
     // start from the exact same local random state.
@@ -252,16 +300,22 @@ fn solve_component(work: ComponentWork) -> ComponentResult {
             let length = work.edges.first().map_or(100.0, |edge| edge.desired);
             vec![[-0.5 * length, 0.0], [0.5 * length, 0.0]]
         }
-        _ => solve_multilevel(node_count, work.edges, component_seed),
+        _ => solve_multilevel(node_count, work.edges, component_seed, cancel)?,
     };
 
-    ComponentResult {
+    Ok(ComponentResult {
         global_nodes: work.global_nodes,
         positions,
-    }
+    })
 }
 
-fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) -> Vec<Pos2> {
+fn solve_multilevel(
+    node_count: usize,
+    edges: Vec<Edge>,
+    component_seed: u64,
+    cancel: &AtomicBool,
+) -> Result<Vec<Pos2>, &'static str> {
+    check_cancel(cancel)?;
     let mut levels = vec![Level {
         node_count,
         edges,
@@ -269,12 +323,17 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) ->
         prolongation: None,
     }];
 
-    while levels.last().is_some_and(|level| level.node_count > COARSE_TARGET)
+    while levels
+        .last()
+        .is_some_and(|level| level.node_count > COARSE_TARGET)
         && levels.len() < MAX_LEVELS
     {
         let level_index = levels.len() - 1;
-        let (coarse, prolongation) =
-            solar_coarsen(&levels[level_index], component_seed ^ level_index as u64);
+        let (coarse, prolongation) = solar_coarsen(
+            &levels[level_index],
+            component_seed ^ level_index as u64,
+            cancel,
+        )?;
         if coarse.node_count >= levels[level_index].node_count {
             break;
         }
@@ -288,15 +347,16 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) ->
 
     let coarsest = &levels[max_level];
     let natural = mean_edge_length(coarsest).max(5.0);
-    let mut positions =
-        deterministic_random_seed(coarsest.node_count, natural, component_seed);
-    let iterations = multilevel_iterations(
-        max_level,
-        max_level,
-        coarsest.node_count,
-        base_iterations,
-    );
-    run_force_iterations(coarsest, &mut positions, iterations, ForcePhase::Normal);
+    let mut positions = deterministic_random_seed(coarsest.node_count, natural, component_seed);
+    let iterations =
+        multilevel_iterations(max_level, max_level, coarsest.node_count, base_iterations);
+    run_force_iterations(
+        coarsest,
+        &mut positions,
+        iterations,
+        ForcePhase::Normal,
+        cancel,
+    )?;
 
     for level_index in (0..max_level).rev() {
         let level = &levels[level_index];
@@ -310,13 +370,15 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) ->
             &positions,
             component_seed ^ (level_index as u64).rotate_left(17),
         );
-        let iterations = multilevel_iterations(
-            level_index,
-            max_level,
-            level.node_count,
-            base_iterations,
-        );
-        run_force_iterations(level, &mut positions, iterations, ForcePhase::Normal);
+        let iterations =
+            multilevel_iterations(level_index, max_level, level.node_count, base_iterations);
+        run_force_iterations(
+            level,
+            &mut positions,
+            iterations,
+            ForcePhase::Normal,
+            cancel,
+        )?;
     }
 
     // Bandage adds this assembly-graph-specific cleanup before FMMM's normal
@@ -326,7 +388,7 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) ->
     // FMMM postprocessing: ten cooler normal-force iterations, rescale to the
     // requested average ideal edge length, then low-repulsion/high-spring fine
     // tuning and a final rescale.
-    run_force_iterations(&levels[0], &mut positions, 10, ForcePhase::Post);
+    run_force_iterations(&levels[0], &mut positions, 10, ForcePhase::Post, cancel)?;
     rescale_to_ideal_edge_length(&levels[0], &mut positions);
 
     if fine_tuning_iterations > 0 {
@@ -337,15 +399,22 @@ fn solve_multilevel(node_count: usize, edges: Vec<Edge>, component_seed: u64) ->
             ForcePhase::Fine {
                 total: fine_tuning_iterations,
             },
-        );
+            cancel,
+        )?;
         rescale_to_ideal_edge_length(&levels[0], &mut positions);
     }
 
     center(&mut positions);
-    positions
+    check_cancel(cancel)?;
+    Ok(positions)
 }
 
-fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
+fn solar_coarsen(
+    level: &Level,
+    salt: u64,
+    cancel: &AtomicBool,
+) -> Result<(Level, Prolongation), &'static str> {
+    check_cancel(cancel)?;
     let adjacency = Adjacency::build(level.node_count, &level.edges);
 
     // OGDF's gcNonUniformProbLowerMass favours low star-mass nodes as suns.
@@ -370,6 +439,7 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
     let mut blocked = vec![false; level.node_count];
     let mut suns = Vec::new();
     for node in candidates {
+        check_cancel(cancel)?;
         if blocked[node] {
             continue;
         }
@@ -396,6 +466,7 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
     let mut distance_to_sun = vec![f32::INFINITY; level.node_count];
 
     for (coarse, &sun) in suns.iter().enumerate() {
+        check_cancel(cancel)?;
         parent[sun] = coarse as u32;
         is_sun[sun] = true;
         distance_to_sun[sun] = 0.0;
@@ -404,6 +475,7 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
     // Direct neighbours of suns are planets. If a node borders multiple suns,
     // retain the shortest dedicated-sun edge.
     for (coarse, &sun) in suns.iter().enumerate() {
+        check_cancel(cancel)?;
         for index in adjacency.range(sun) {
             let node = adjacency.neighbours[index] as usize;
             if is_sun[node] {
@@ -421,12 +493,16 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
     // neighbour. The solar-system construction guarantees short paths; this
     // queue also makes the code robust to unusual sparse structures.
     let mut queue = VecDeque::new();
-    for node in 0..level.node_count {
-        if parent[node] != u32::MAX {
+    for (node, &node_parent) in parent.iter().enumerate() {
+        if node & 1023 == 0 {
+            check_cancel(cancel)?;
+        }
+        if node_parent != u32::MAX {
             queue.push_back(node);
         }
     }
     while let Some(node) = queue.pop_front() {
+        check_cancel(cancel)?;
         let parent_node = parent[node];
         let base_distance = distance_to_sun[node];
         for index in adjacency.range(node) {
@@ -441,6 +517,9 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
         }
     }
     for node in 0..level.node_count {
+        if node & 1023 == 0 {
+            check_cancel(cancel)?;
+        }
         if parent[node] == u32::MAX {
             parent[node] = 0;
             distance_to_sun[node] = 0.0;
@@ -477,6 +556,9 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
 
     let mut constraint_offsets = vec![0usize; level.node_count + 1];
     for node in 0..level.node_count {
+        if node & 1023 == 0 {
+            check_cancel(cancel)?;
+        }
         constraint_offsets[node + 1] = constraint_offsets[node] + constraint_count[node];
     }
     let mut cursor = constraint_offsets[..level.node_count].to_vec();
@@ -516,7 +598,7 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
         .collect();
     edges.sort_unstable_by_key(|edge| (edge.a, edge.b));
 
-    (
+    Ok((
         Level {
             node_count: coarse_count,
             edges,
@@ -531,7 +613,7 @@ fn solar_coarsen(level: &Level, salt: u64) -> (Level, Prolongation) {
             neighbour_parent,
             lambda,
         },
-    )
+    ))
 }
 
 fn prolong_positions(
@@ -542,11 +624,11 @@ fn prolong_positions(
 ) -> Vec<Pos2> {
     let mut positions = vec![[0.0f32; 2]; level.node_count];
 
-    for node in 0..level.node_count {
+    for (node, position) in positions.iter_mut().enumerate() {
         let own_parent = prolongation.parent[node] as usize;
         let own_sun = coarse_positions[own_parent];
         if prolongation.is_sun[node] {
-            positions[node] = own_sun;
+            *position = own_sun;
             continue;
         }
 
@@ -565,23 +647,19 @@ fn prolong_positions(
                 ];
                 let span = distance(own_sun, other);
                 let wiggle = deterministic_waggle(
-                    node as u64
-                        ^ (constraint as u64).rotate_left(19)
-                        ^ salt.rotate_left(7),
+                    node as u64 ^ (constraint as u64).rotate_left(19) ^ salt.rotate_left(7),
                     span * WAGGLE_FACTOR,
                 );
                 sum[0] += base[0] + wiggle[0];
                 sum[1] += base[1] + wiggle[1];
                 count += 1.0;
             }
-            positions[node] = [sum[0] / count, sum[1] / count];
+            *position = [sum[0] / count, sum[1] / count];
         } else {
             let radius = prolongation.distance_to_sun[node].max(1.0);
-            let offset = deterministic_radius_position(
-                node as u64 ^ salt ^ 0xA24B_AED4_963E_E407,
-                radius,
-            );
-            positions[node] = [own_sun[0] + offset[0], own_sun[1] + offset[1]];
+            let offset =
+                deterministic_radius_position(node as u64 ^ salt ^ 0xA24B_AED4_963E_E407, radius);
+            *position = [own_sun[0] + offset[0], own_sun[1] + offset[1]];
         }
     }
 
@@ -598,8 +676,7 @@ fn multilevel_iterations(
         fixed_iterations * 10
     } else {
         let ratio = act_level as f32 / max_level as f32;
-        fixed_iterations
-            + (ratio * (9 * fixed_iterations) as f32).round() as usize
+        fixed_iterations + (ratio * (9 * fixed_iterations) as f32).round() as usize
     };
     if node_count <= 500 {
         iterations.max(100)
@@ -620,9 +697,11 @@ fn run_force_iterations(
     positions: &mut [Pos2],
     iterations: usize,
     phase: ForcePhase,
-) {
+    cancel: &AtomicBool,
+) -> Result<(), &'static str> {
+    check_cancel(cancel)?;
     if positions.len() <= 1 || iterations == 0 {
-        return;
+        return Ok(());
     }
 
     let average_ideal = mean_edge_length(level).max(1.0);
@@ -632,9 +711,13 @@ fn run_force_iterations(
     let mut previous_movement = vec![[0.0f32; 2]; positions.len()];
 
     for iteration in 0..iterations {
+        check_cancel(cancel)?;
         attraction.fill([0.0, 0.0]);
 
-        for edge in &level.edges {
+        for (index, edge) in level.edges.iter().enumerate() {
+            if index & 1023 == 0 {
+                check_cancel(cancel)?;
+            }
             let a = edge.a as usize;
             let b = edge.b as usize;
             let dx = positions[b][0] - positions[a][0];
@@ -644,8 +727,7 @@ fn run_force_iterations(
                 continue;
             }
             let ideal = edge.desired.max(1.0);
-            let scalar = (d / ideal).max(EPSILON).log2() * d * d
-                / (ideal * ideal * ideal);
+            let scalar = (d / ideal).max(EPSILON).log2() * d * d / (ideal * ideal * ideal);
             let fx = dx / d * scalar;
             let fy = dy / d * scalar;
             attraction[a][0] += fx;
@@ -659,6 +741,9 @@ fn run_force_iterations(
                 .par_iter_mut()
                 .enumerate()
                 .for_each(|(target, force)| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let mut total = [0.0f32; 2];
                     for source in 0..positions.len() {
                         if source == target {
@@ -671,11 +756,14 @@ fn run_force_iterations(
                     *force = total;
                 });
         } else {
-            let tree = BarnesHutTree::build(positions);
+            let tree = BarnesHutTree::build(positions, cancel)?;
             repulsion
                 .par_iter_mut()
                 .enumerate()
                 .for_each(|(target, force)| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
                     *force = tree.repulsion(target, positions, THETA);
                 });
         }
@@ -684,7 +772,7 @@ fn run_force_iterations(
             ForcePhase::Normal => (1.0, 1.0, 1.0),
             ForcePhase::Post => (1.0, 1.0, 0.1),
             ForcePhase::Fine { total } => {
-                let cool = if iteration + 1 <= total.saturating_sub(5) {
+                let cool = if iteration < total.saturating_sub(5) {
                     0.2
                 } else {
                     0.02
@@ -702,24 +790,19 @@ fn run_force_iterations(
         }
         .max(0.01);
 
-        movement
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(node, out)| {
-                let fx = scale
-                    * (spring_strength * attraction[node][0]
-                        + repulsion_strength * repulsion[node][0]);
-                let fy = scale
-                    * (spring_strength * attraction[node][1]
-                        + repulsion_strength * repulsion[node][1]);
-                let norm = (fx * fx + fy * fy).sqrt();
-                if norm <= EPSILON {
-                    *out = [0.0, 0.0];
-                    return;
-                }
-                let allowed = (norm * cool_factor * FORCE_SCALING).min(max_radius);
-                *out = [fx / norm * allowed, fy / norm * allowed];
-            });
+        movement.par_iter_mut().enumerate().for_each(|(node, out)| {
+            let fx = scale
+                * (spring_strength * attraction[node][0] + repulsion_strength * repulsion[node][0]);
+            let fy = scale
+                * (spring_strength * attraction[node][1] + repulsion_strength * repulsion[node][1]);
+            let norm = (fx * fx + fy * fy).sqrt();
+            if norm <= EPSILON {
+                *out = [0.0, 0.0];
+                return;
+            }
+            let allowed = (norm * cool_factor * FORCE_SCALING).min(max_radius);
+            *out = [fx / norm * allowed, fy / norm * allowed];
+        });
 
         if iteration > 0 {
             movement
@@ -751,6 +834,7 @@ fn run_force_iterations(
             break;
         }
     }
+    check_cancel(cancel)
 }
 
 fn prevent_oscillation(new: &mut Pos2, old: Pos2) {
@@ -760,8 +844,7 @@ fn prevent_oscillation(new: &mut Pos2, old: Pos2) {
         return;
     }
 
-    let cos_angle =
-        ((new[0] * old[0] + new[1] * old[1]) / (new_norm * old_norm)).clamp(-1.0, 1.0);
+    let cos_angle = ((new[0] * old[0] + new[1] * old[1]) / (new_norm * old_norm)).clamp(-1.0, 1.0);
     let angle = cos_angle.acos();
 
     let max_factor = if angle <= std::f32::consts::FRAC_PI_6 {
@@ -811,10 +894,7 @@ fn rescale_to_ideal_edge_length(level: &Level, positions: &mut [Pos2]) {
     let mut actual = 0.0f64;
     for edge in &level.edges {
         ideal += edge.desired as f64;
-        actual += distance(
-            positions[edge.a as usize],
-            positions[edge.b as usize],
-        ) as f64;
+        actual += distance(positions[edge.a as usize], positions[edge.b as usize]) as f64;
     }
     if actual <= f64::EPSILON {
         return;
@@ -842,9 +922,7 @@ fn deterministic_random_seed(node_count: usize, natural: f32, salt: u64) -> Vec<
         .max(20.0);
     (0..node_count)
         .map(|node| {
-            let x = unit_from_hash(splitmix64(
-                node as u64 ^ salt ^ 0x69D5_7FC8_A2E4_7301,
-            ));
+            let x = unit_from_hash(splitmix64(node as u64 ^ salt ^ 0x69D5_7FC8_A2E4_7301));
             let y = unit_from_hash(splitmix64(
                 node as u64 ^ salt.rotate_left(29) ^ 0xD2B7_4407_B1CE_6E93,
             ));
@@ -948,19 +1026,18 @@ fn fix_twisted_splits(level: &Level, positions: &mut [Pos2]) {
             let a2 = path_a[i + 1];
             let b1 = path_b[i];
             let b2 = path_b[i + 1];
-            if segments_cross(
-                positions[a1],
-                positions[a2],
-                positions[b1],
-                positions[b2],
-            ) {
+            if segments_cross(positions[a1], positions[a2], positions[b1], positions[b2]) {
                 positions.swap(a2, b2);
             }
         }
     }
 }
 
-fn follow_until_branch(previous: usize, first: usize, adjacency: &Adjacency) -> (usize, Vec<usize>) {
+fn follow_until_branch(
+    previous: usize,
+    first: usize,
+    adjacency: &Adjacency,
+) -> (usize, Vec<usize>) {
     let mut prev = previous;
     let mut current = first;
     let mut path = vec![first];
@@ -1037,7 +1114,7 @@ struct BarnesHutTree {
 }
 
 impl BarnesHutTree {
-    fn build(positions: &[Pos2]) -> Self {
+    fn build(positions: &[Pos2], cancel: &AtomicBool) -> Result<Self, &'static str> {
         let mut min = [f32::INFINITY; 2];
         let mut max = [f32::NEG_INFINITY; 2];
         for point in positions {
@@ -1047,17 +1124,18 @@ impl BarnesHutTree {
             max[1] = max[1].max(point[1]);
         }
         let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
-        let half = ((max[0] - min[0]).max(max[1] - min[1]) * 0.5)
-            .max(1.0)
-            * 1.0001;
+        let half = ((max[0] - min[0]).max(max[1] - min[1]) * 0.5).max(1.0) * 1.0001;
 
         let mut tree = Self {
             nodes: vec![QuadNode::empty(center, half)],
         };
         for point in 0..positions.len() {
+            if point & 1023 == 0 {
+                check_cancel(cancel)?;
+            }
             tree.insert(0, point, positions, 0);
         }
-        tree
+        Ok(tree)
     }
 
     fn insert(&mut self, node_index: usize, point_index: usize, positions: &[Pos2], depth: usize) {
@@ -1186,8 +1264,7 @@ impl BarnesHutTree {
         let mut force = [0.0, 0.0];
         for child in node.children {
             if child >= 0 {
-                let child_force =
-                    self.repulsion_from(child as usize, target, positions, theta);
+                let child_force = self.repulsion_from(child as usize, target, positions, theta);
                 force[0] += child_force[0];
                 force[1] += child_force[1];
             }
@@ -1272,6 +1349,7 @@ mod tests {
             &[0, 1, 0, 2],
             &[1, 0, 1, 2],
             &[10.0, 30.0, 20.0, 50.0],
+            &AtomicBool::new(false),
         )
         .unwrap();
         assert_eq!(edges.len(), 1);
@@ -1290,8 +1368,7 @@ mod tests {
 
     #[test]
     fn branched_graph_spreads_in_two_dimensions() {
-        let mut edges: Vec<(u32, u32)> =
-            (1..1000).map(|node| (node - 1, node)).collect();
+        let mut edges: Vec<(u32, u32)> = (1..1000).map(|node| (node - 1, node)).collect();
         edges.extend((0..997).step_by(17).map(|node| (node, node + 3)));
         let output = run(1000, &edges);
 
@@ -1324,7 +1401,7 @@ mod tests {
             hierarchy_mass: vec![1; 8],
             prolongation: None,
         };
-        let (coarse, _) = solar_coarsen(&level, 0);
+        let (coarse, _) = solar_coarsen(&level, 0, &AtomicBool::new(false)).unwrap();
         assert!(coarse.node_count < level.node_count);
         assert!(coarse.edges.iter().all(|edge| edge.desired >= 100.0));
     }
@@ -1333,6 +1410,35 @@ mod tests {
     fn disconnected_components_are_solved_independently() {
         let output = run(6, &[(0, 1), (1, 2), (3, 4), (4, 5)]);
         assert!(output.iter().flatten().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn cancellation_interrupts_force_iterations() {
+        let level = Level {
+            node_count: 20_000,
+            edges: (1..20_000)
+                .map(|i| Edge {
+                    a: i - 1,
+                    b: i,
+                    desired: 100.0,
+                })
+                .collect(),
+            hierarchy_mass: vec![1; 20_000],
+            prolongation: None,
+        };
+        let mut positions = deterministic_random_seed(level.node_count, 100.0, 17);
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            assert_eq!(
+                run_force_iterations(&level, &mut positions, 10_000, ForcePhase::Normal, &cancel),
+                Err("Layout cancelled")
+            );
+        });
+        assert!(positions.iter().flatten().all(|v| v.is_finite()));
     }
 
     #[test]

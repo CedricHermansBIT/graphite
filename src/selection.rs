@@ -1,7 +1,7 @@
 //! Selection: tracks which nodes and edges are selected.
 
-use std::collections::HashSet;
 use egui::{Pos2, Rect, Vec2};
+use std::collections::HashSet;
 
 use crate::graph::ViewGraph;
 use crate::layout::Layout;
@@ -31,12 +31,15 @@ impl Selection {
     }
 
     pub fn select_node(&mut self, idx: usize, add: bool) {
-        if !add { self.clear(); }
+        if !add {
+            self.clear();
+        }
         self.nodes.insert(idx);
     }
 
     /// Select all nodes within a screen rectangle.
     /// Select all nodes within a screen rectangle.
+    #[allow(clippy::too_many_arguments)]
     pub fn rubber_band_select(
         &mut self,
         rect: Rect,
@@ -47,11 +50,15 @@ impl Selection {
         viewport_center: Pos2,
         add: bool,
     ) {
-        if !add { self.clear(); }
+        if !add {
+            self.clear();
+        }
         let num_nodes = layout.num_nodes();
 
         for (ni, _node) in graph.nodes.iter().enumerate() {
-            if ni >= num_nodes { continue; }
+            if ni >= num_nodes {
+                continue;
+            }
 
             // Calculate the screen position using the node's segment center
             let c = layout.center(ni);
@@ -66,17 +73,15 @@ impl Selection {
     }
     /// Select all nodes in the same connected component as `start`.
     pub fn select_component(&mut self, start: usize, graph: &ViewGraph, add: bool) {
-        if !add { self.clear(); }
-        let adj = graph.build_adjacency();
-        let mut stack = vec![start];
-        let mut visited = HashSet::new();
-        while let Some(v) = stack.pop() {
-            if visited.contains(&v) { continue; }
-            visited.insert(v);
-            self.nodes.insert(v);
-            for &(nb, _) in &adj[v] {
-                if !visited.contains(&nb) { stack.push(nb); }
-            }
+        if !add {
+            self.clear();
+        }
+        if let Some(component) = graph
+            .components
+            .iter()
+            .find(|component| component.nodes.contains(&start))
+        {
+            self.nodes.extend(component.nodes.iter().copied());
         }
     }
 

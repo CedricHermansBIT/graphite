@@ -1,6 +1,7 @@
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use crate::gfa::Strand;
@@ -173,7 +174,6 @@ fn preserve_ring_area(
     }
 }
 
-
 #[derive(Clone, Debug)]
 struct PackFootprint {
     width: i32,
@@ -187,6 +187,78 @@ struct PackFootprint {
     /// minimum. Padding can make this non-zero.
     anchor_x: i32,
     anchor_y: i32,
+}
+
+fn check_cancel(cancel: &AtomicBool) -> anyhow::Result<()> {
+    anyhow::ensure!(!cancel.load(AtomicOrdering::Relaxed), "Layout cancelled");
+    Ok(())
+}
+
+/// Preserve the exhaustive skyline heuristic and its leftmost tie-break while
+/// avoiding work for candidates that already cannot beat the current minimum.
+fn pack_profiles(
+    footprints: &[PackFootprint],
+    cancel: &AtomicBool,
+) -> Result<Vec<(i32, i32)>, &'static str> {
+    let envelope_area: f32 = footprints
+        .iter()
+        .map(|shape| shape.width as f32 * shape.height as f32)
+        .sum();
+    let max_width = footprints
+        .iter()
+        .map(|shape| shape.width)
+        .max()
+        .unwrap_or(1);
+    let target_width = (envelope_area * PACK_TARGET_ASPECT)
+        .sqrt()
+        .ceil()
+        .max(max_width as f32) as i32;
+    let mut skyline = vec![0_i32; target_width.max(1) as usize];
+    let mut placements = Vec::with_capacity(footprints.len());
+
+    for shape in footprints {
+        if cancel.load(AtomicOrdering::Relaxed) {
+            return Err("Layout cancelled");
+        }
+        let max_x = (target_width - shape.width).max(0);
+        let mut best_x = 0_i32;
+        let mut best_y = i32::MAX;
+
+        // For a fixed shape, resulting height is max(packed_height, y +
+        // shape.height). Minimizing (height, y, x) is therefore identical to
+        // minimizing (y, x); no second pass over the top profile is necessary.
+        for candidate_x in 0..=max_x {
+            if candidate_x & 1023 == 0 && cancel.load(AtomicOrdering::Relaxed) {
+                return Err("Layout cancelled");
+            }
+            let mut candidate_y = 0_i32;
+            for (column, (&bottom, &top)) in shape.bottom.iter().zip(&shape.top).enumerate() {
+                if top < bottom {
+                    continue;
+                }
+                candidate_y = candidate_y.max(skyline[candidate_x as usize + column] - bottom);
+                if candidate_y >= best_y {
+                    break;
+                }
+            }
+            if candidate_y < best_y {
+                best_x = candidate_x;
+                best_y = candidate_y;
+                // Zero is the global lower bound. Later x cannot improve it.
+                if best_y == 0 {
+                    break;
+                }
+            }
+        }
+        placements.push((best_x, best_y));
+        for (column, (&bottom, &top)) in shape.bottom.iter().zip(&shape.top).enumerate() {
+            if top >= bottom {
+                let global_x = best_x as usize + column;
+                skyline[global_x] = skyline[global_x].max(best_y + top + 1);
+            }
+        }
+    }
+    Ok(placements)
 }
 
 fn update_pack_profile(bottom: &mut [i32], top: &mut [i32], x: i32, y: i32) {
@@ -210,9 +282,7 @@ fn rasterize_pack_segment_profile(
     let ay = (a[1] - lo[1]) / cell_size;
     let bx = (b[0] - lo[0]) / cell_size;
     let by = (b[1] - lo[1]) / cell_size;
-    let steps = ((bx - ax).abs().max((by - ay).abs()) * 2.0)
-        .ceil()
-        .max(1.0) as usize;
+    let steps = ((bx - ax).abs().max((by - ay).abs()) * 2.0).ceil().max(1.0) as usize;
     for step in 0..=steps {
         let t = step as f32 / steps as f32;
         update_pack_profile(
@@ -346,6 +416,7 @@ fn unit_hash(value: u64) -> f32 {
     ((layout_hash(value) >> 40) as u32) as f32 / 16_777_215.0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_linear_component(
     comp: &[usize],
     component_index: usize,
@@ -375,8 +446,7 @@ fn seed_linear_component(
     let phase2 = unit_hash(seed ^ 0x69D5_7FC8_A2E4_7301) * std::f32::consts::TAU;
     let turn_amplitude = 0.14 + 0.10 * unit_hash(seed ^ 0xA24B_AED4_963E_E407);
     let secondary_amplitude = 0.025 + 0.035 * unit_hash(seed ^ 0x9FB2_1C65_1E98_DF25);
-    let wavelength =
-        physics_spacing * (7.0 + 3.0 * unit_hash(seed ^ 0x31D0_8C59_EA22_4A9B));
+    let wavelength = physics_spacing * (7.0 + 3.0 * unit_hash(seed ^ 0x31D0_8C59_EA22_4A9B));
 
     let mut position = [0.0_f32, 0.0_f32];
     let mut distance = 0.0_f32;
@@ -385,8 +455,7 @@ fn seed_linear_component(
             return;
         }
         let midpoint = *distance + step * 0.5;
-        let theta = turn_amplitude
-            * (std::f32::consts::TAU * midpoint / wavelength + phase).sin()
+        let theta = turn_amplitude * (std::f32::consts::TAU * midpoint / wavelength + phase).sin()
             + secondary_amplitude
                 * (std::f32::consts::TAU * midpoint / (wavelength * 0.57) + phase2).sin();
         position[0] += step * theta.cos();
@@ -610,10 +679,7 @@ impl Layout {
             let segment = (dx * dx + dy * dy).sqrt();
             if travelled + segment >= target && segment > f32::EPSILON {
                 let t = ((target - travelled) / segment).clamp(0.0, 1.0);
-                return [
-                    pair[0][0] + dx * t,
-                    pair[0][1] + dy * t,
-                ];
+                return [pair[0][0] + dx * t, pair[0][1] + dy * t];
             }
             travelled += segment;
         }
@@ -636,9 +702,43 @@ impl Layout {
     }
 
     pub fn new_with_graph_backend(graph: &ViewGraph, backend: LayoutBackend) -> Self {
+        Self::try_new_with_graph_backend(graph, backend, &AtomicBool::new(false))
+            .expect("uncancelled layout initialization")
+    }
+
+    /// The optional native OGDF call can only be cancelled before/after it
+    /// returns. The Rust solver checks cancellation throughout its work.
+    pub fn try_new_with_graph_backend(
+        graph: &ViewGraph,
+        backend: LayoutBackend,
+        cancel: &AtomicBool,
+    ) -> anyhow::Result<Self> {
+        Self::initialize(graph, backend, cancel, None)
+    }
+
+    /// Rebuild interaction topology without solving or packing saved geometry.
+    pub fn try_from_positions(
+        graph: &ViewGraph,
+        positions: &[Pos2],
+        cancel: &AtomicBool,
+    ) -> anyhow::Result<Self> {
+        Self::initialize(graph, LayoutBackend::Rust, cancel, Some(positions))
+    }
+
+    fn initialize(
+        graph: &ViewGraph,
+        backend: LayoutBackend,
+        cancel: &AtomicBool,
+        saved_positions: Option<&[Pos2]>,
+    ) -> anyhow::Result<Self> {
+        check_cancel(cancel)?;
         let n = graph.nodes.len();
         if n == 0 {
-            return Self {
+            anyhow::ensure!(
+                saved_positions.is_none_or(|p| p.is_empty()),
+                "Saved layout has an incompatible position count"
+            );
+            return Ok(Self {
                 positions: Vec::new(),
                 node_pts_start: Vec::new(),
                 node_pts_count: Vec::new(),
@@ -673,7 +773,7 @@ impl Layout {
                 revision: 0,
                 iteration: 0,
                 converged: false,
-            };
+            });
         }
 
         let physics_spacing = bandage_equivalent_spacing(graph);
@@ -684,12 +784,14 @@ impl Layout {
         let mut visited = vec![false; n];
         let mut components: Vec<Vec<usize>> = Vec::new();
         for i in 0..n {
+            check_cancel(cancel)?;
             if visited[i] {
                 continue;
             }
             let mut comp = Vec::new();
             let mut stack = vec![i];
             while let Some(v) = stack.pop() {
+                check_cancel(cancel)?;
                 if visited[v] {
                     continue;
                 }
@@ -708,6 +810,7 @@ impl Layout {
         // top-left to bottom-right packing.
         let mut comp_ids = vec![0usize; n];
         for (ci, comp) in components.iter().enumerate() {
+            check_cancel(cancel)?;
             for &v in comp {
                 comp_ids[v] = ci;
             }
@@ -717,16 +820,17 @@ impl Layout {
         // Match Bandage's ceil(drawn_len / nodeSegmentLength) + 1 sampling,
         // translated back into Graphite's visible coordinate scale.
         let mut node_pts_count = vec![2usize; n];
-        for ni in 0..n {
+        for (ni, count) in node_pts_count.iter_mut().enumerate() {
+            check_cancel(cancel)?;
             let vl = graph.nodes[ni].visual_len;
-            node_pts_count[ni] =
-                ((vl / physics_spacing).ceil() as usize + 1).clamp(2, MAX_PTS);
+            *count = ((vl / physics_spacing).ceil() as usize + 1).clamp(2, MAX_PTS);
         }
         let total_pts: usize = node_pts_count.iter().sum();
 
         let mut node_pts_start = vec![0usize; n];
         let mut offset = 0usize;
         for ni in 0..n {
+            check_cancel(cancel)?;
             node_pts_start[ni] = offset;
             offset += node_pts_count[ni];
         }
@@ -736,6 +840,7 @@ impl Layout {
         // and two-segment circles as well as ordinary rings.
         let mut ends = vec![Vec::new(); 2 * n];
         for e in &graph.edges {
+            check_cancel(cancel)?;
             let a = 2 * e.from + usize::from(matches!(e.from_strand, Strand::Forward));
             let b = 2 * e.to + usize::from(matches!(e.to_strand, Strand::Reverse));
             ends[a].push(b);
@@ -775,6 +880,7 @@ impl Layout {
             .collect();
         // Even short circular contigs need enough samples to look round.
         for (ci, comp) in components.iter().enumerate() {
+            check_cancel(cancel)?;
             if circular[ci] {
                 for &v in comp {
                     node_pts_count[v] = node_pts_count[v].max((32 / comp.len()).clamp(2, 32));
@@ -783,6 +889,7 @@ impl Layout {
         }
         let mut total_pts = 0;
         for v in 0..n {
+            check_cancel(cancel)?;
             node_pts_start[v] = total_pts;
             total_pts += node_pts_count[v];
         }
@@ -791,12 +898,11 @@ impl Layout {
         let mut depth = vec![usize::MAX; n];
         let mut reverse = vec![false; n];
         for (ci, comp) in components.iter().enumerate() {
+            check_cancel(cancel)?;
             if circular[ci] {
                 let circumference: f32 = comp
                     .iter()
-                    .map(|&v| {
-                        graph.nodes[v].visual_len.max(physics_spacing) + graph_edge_desired
-                    })
+                    .map(|&v| graph.nodes[v].visual_len.max(physics_spacing) + graph_edge_desired)
                     .sum();
                 let radius = circumference / std::f32::consts::TAU;
                 let mut entry = comp[0] * 2;
@@ -837,6 +943,7 @@ impl Layout {
                 let mut widths: Vec<f32> = Vec::new();
                 let mut counts: Vec<usize> = Vec::new();
                 while head < queue.len() {
+                    check_cancel(cancel)?;
                     let v = queue[head];
                     head += 1;
                     let d = depth[v];
@@ -846,8 +953,8 @@ impl Layout {
                     }
                     widths[d] = widths[d].max(graph.nodes[v].visual_len);
                     counts[d] += 1;
-                    for endpoint in 2 * v..2 * v + 2 {
-                        for &entry in &ends[endpoint] {
+                    for endpoint in &ends[2 * v..2 * v + 2] {
+                        for &entry in endpoint {
                             let nb = entry / 2;
                             if depth[nb] == usize::MAX {
                                 depth[nb] = d + 1;
@@ -864,8 +971,7 @@ impl Layout {
                         (w + physics_spacing) * physics_spacing * 2.0 * count as f32
                     })
                     .sum();
-                let max_rows =
-                    (area.sqrt() / (physics_spacing * 2.0)).ceil().max(1.0) as usize;
+                let max_rows = (area.sqrt() / (physics_spacing * 2.0)).ceil().max(1.0) as usize;
                 let mut x = vec![0.0; widths.len()];
                 for d in 1..x.len() {
                     x[d] = x[d - 1]
@@ -898,6 +1004,7 @@ impl Layout {
         let mut phys_to_node: Vec<u32> = vec![0u32; total_pts];
         let mut phys_chain_idx: Vec<u8> = vec![0u8; total_pts];
         for ni in 0..n {
+            check_cancel(cancel)?;
             let s = node_pts_start[ni];
             let c = node_pts_count[ni];
             for j in 0..c {
@@ -916,6 +1023,7 @@ impl Layout {
         let mut pbd_seen = HashSet::<(usize, usize)>::new();
 
         for node in 0..n {
+            check_cancel(cancel)?;
             let ci = comp_ids[node];
             let start = node_pts_start[node];
             let count = node_pts_count[node];
@@ -942,6 +1050,7 @@ impl Layout {
         }
 
         for edge in &graph.edges {
+            check_cancel(cancel)?;
             if edge.from >= n || edge.to >= n {
                 continue;
             }
@@ -982,6 +1091,7 @@ impl Layout {
         // not: their topology is handled by generic graph constraints instead.
         let mut pbd_ring_paths = vec![Vec::new(); components.len()];
         for (ci, comp) in components.iter().enumerate() {
+            check_cancel(cancel)?;
             if !circular[ci] || comp.is_empty() {
                 continue;
             }
@@ -1018,6 +1128,7 @@ impl Layout {
         };
 
         for ni in 0..n {
+            check_cancel(cancel)?;
             if fixed[comp_ids[ni]] {
                 continue;
             }
@@ -1034,6 +1145,7 @@ impl Layout {
         }
 
         for edge in &graph.edges {
+            check_cancel(cancel)?;
             let u = edge.from;
             let v = edge.to;
             if u >= n || v >= n || fixed[comp_ids[u]] {
@@ -1112,15 +1224,23 @@ impl Layout {
             iteration: 0,
             converged: false,
         };
+        check_cancel(cancel)?;
+        if let Some(positions) = saved_positions {
+            layout.restore_positions(positions)?;
+            check_cancel(cancel)?;
+            return Ok(layout);
+        }
         layout.converged = match backend {
             #[cfg(feature = "ogdf")]
             LayoutBackend::Bandage => layout.seed_with_bandage(graph),
-            LayoutBackend::Rust => layout.seed_with_rust(graph),
+            LayoutBackend::Rust => layout.seed_with_rust(graph, cancel)?,
         };
+        check_cancel(cancel)?;
         layout.orient_tall_components();
-        layout.pack_components();
+        layout.pack_components_cancellable(cancel)?;
         layout.refresh_pbd_rest_geometry();
-        layout
+        check_cancel(cancel)?;
+        Ok(layout)
     }
 
     /// Use Bandage's bundled OGDF FMMM implementation on connected, non-ring
@@ -1218,9 +1338,10 @@ impl Layout {
 
     /// Use Graphite's Rust multilevel Barnes-Hut backend on the same reduced
     /// representation passed to Bandage/OGDF.
-    fn seed_with_rust(&mut self, graph: &ViewGraph) -> bool {
+    fn seed_with_rust(&mut self, graph: &ViewGraph, cancel: &AtomicBool) -> anyhow::Result<bool> {
+        check_cancel(cancel)?;
         if self.active_points.is_empty() {
-            return true;
+            return Ok(true);
         }
 
         let max_samples = if self.active_points.len() > 100_000 {
@@ -1236,6 +1357,7 @@ impl Layout {
         let mut lengths = Vec::new();
 
         for v in 0..self.num_nodes() {
+            check_cancel(cancel)?;
             if self.fixed[self.comp_ids[v]] || self.linear[self.comp_ids[v]] {
                 continue;
             }
@@ -1290,20 +1412,22 @@ impl Layout {
         }
 
         if samples.is_empty() {
-            return true;
+            return Ok(true);
         }
         let initial: Vec<Pos2> = samples.iter().map(|&pi| self.positions[pi]).collect();
         let mut output = vec![[0.0_f32; 2]; samples.len()];
-        if let Err(error) = rust_layout::initial_layout(
+        if let Err(error) = rust_layout::initial_layout_cancellable(
             output.len(),
             &from,
             &to,
             &lengths,
             &initial,
             &mut output,
+            cancel,
         ) {
+            check_cancel(cancel)?;
             log::warn!("Rust initial layout failed ({error}); using fallback placement");
-            return false;
+            return Ok(false);
         }
 
         for range in ranges {
@@ -1323,7 +1447,8 @@ impl Layout {
                 }
             }
         }
-        true
+        check_cancel(cancel)?;
+        Ok(true)
     }
 
     /// Rotate tall solved components by 90 degrees before packing. Bandage
@@ -1360,7 +1485,7 @@ impl Layout {
     ///
     /// 1. Rasterize the actual component silhouette.
     /// 2. Reduce each silhouette to per-column bottom/top profiles.
-    /// 3. Place profiles with a shape-aware skyline in near-linear time.
+    /// 3. Place profiles with a shape-aware skyline, pruning losing candidates.
     ///    Circular assemblies use a filled ellipse footprint, protecting
     ///    their interior while allowing unrelated components to occupy the
     ///    otherwise wasted corners of their bounding square.
@@ -1368,8 +1493,14 @@ impl Layout {
     /// This keeps the predictable speed of rectangular packing while avoiding
     /// the large empty rows caused by circles and irregular branched graphs.
     fn pack_components(&mut self) {
+        self.pack_components_cancellable(&AtomicBool::new(false))
+            .expect("uncancelled component packing");
+    }
+
+    fn pack_components_cancellable(&mut self, cancel: &AtomicBool) -> anyhow::Result<()> {
+        check_cancel(cancel)?;
         if self.components.is_empty() {
-            return;
+            return Ok(());
         }
 
         let cell_size = (self.physics_spacing * PACK_CELL_SCALE).max(1.0);
@@ -1377,10 +1508,12 @@ impl Layout {
         let bounds: Vec<(Pos2, Pos2)> = self
             .components
             .iter()
-            .map(|comp| {
+            .map(|comp| -> anyhow::Result<_> {
+                check_cancel(cancel)?;
                 let mut lo = [f32::INFINITY; 2];
                 let mut hi = [f32::NEG_INFINITY; 2];
                 for &v in comp {
+                    check_cancel(cancel)?;
                     for p in self.pts(v) {
                         lo[0] = lo[0].min(p[0]);
                         lo[1] = lo[1].min(p[1]);
@@ -1388,13 +1521,13 @@ impl Layout {
                         hi[1] = hi[1].max(p[1]);
                     }
                 }
-                (lo, hi)
+                Ok((lo, hi))
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
 
         let mut footprints = Vec::with_capacity(self.components.len());
-        for ci in 0..self.components.len() {
-            let (lo, hi) = bounds[ci];
+        for (ci, &(lo, hi)) in bounds.iter().enumerate() {
+            check_cancel(cancel)?;
             let raw_width = (((hi[0] - lo[0]) / cell_size).ceil() as usize + 1).max(1);
             let mut bottom = vec![i32::MAX; raw_width];
             let mut top = vec![i32::MIN; raw_width];
@@ -1411,6 +1544,9 @@ impl Layout {
                 let ry = cy.max(0.5);
 
                 for x in 0..raw_width {
+                    if x & 1023 == 0 {
+                        check_cancel(cancel)?;
+                    }
                     let nx = (x as f32 - cx) / rx;
                     if nx.abs() > 1.0 {
                         continue;
@@ -1424,6 +1560,7 @@ impl Layout {
                 // HashSet is needed because the skyline packer only consumes
                 // the lower and upper envelope of each footprint.
                 for &constraint_index in &self.pbd_component_distances[ci] {
+                    check_cancel(cancel)?;
                     let constraint = self.pbd_distances[constraint_index];
                     rasterize_pack_segment_profile(
                         &mut bottom,
@@ -1464,79 +1601,11 @@ impl Layout {
         // non-overlapping y for a candidate x is computed directly in O(width).
         // This keeps the useful circle-corner compaction without a height-sized
         // inner loop.
-        let envelope_area: f32 = footprints
-            .iter()
-            .map(|shape| (shape.width * shape.height).max(1) as f32)
-            .sum();
-        let max_width = footprints.iter().map(|shape| shape.width).max().unwrap_or(1);
-        let target_width = (envelope_area * PACK_TARGET_ASPECT)
-            .sqrt()
-            .ceil()
-            .max(max_width as f32) as i32;
-
-        let mut skyline = vec![0_i32; target_width.max(1) as usize];
-        let mut placements = vec![(0_i32, 0_i32); footprints.len()];
-        let mut packed_height = 0_i32;
-
-        for (ci, shape) in footprints.iter().enumerate() {
-            let max_x = (target_width - shape.width).max(0);
-            let mut best_x = 0_i32;
-            let mut best_y = i32::MAX;
-            let mut best_height = i32::MAX;
-
-            for candidate_x in 0..=max_x {
-                let mut candidate_y = 0_i32;
-                for local_x in 0..shape.width {
-                    let column = local_x as usize;
-                    if shape.top[column] < shape.bottom[column] {
-                        continue;
-                    }
-                    candidate_y = candidate_y.max(
-                        skyline[(candidate_x + local_x) as usize] - shape.bottom[column],
-                    );
-                }
-                candidate_y = candidate_y.max(0);
-
-                let mut resulting_height = packed_height;
-                for local_x in 0..shape.width {
-                    let column = local_x as usize;
-                    if shape.top[column] < shape.bottom[column] {
-                        continue;
-                    }
-                    resulting_height =
-                        resulting_height.max(candidate_y + shape.top[column] + 1);
-                }
-
-                // Prefer the placement that keeps the total drawing shortest;
-                // then the lowest y, then the left-most x. This is a skyline
-                // analogue of best-height/best-fit rectangle heuristics.
-                if resulting_height < best_height
-                    || (resulting_height == best_height && candidate_y < best_y)
-                    || (resulting_height == best_height
-                        && candidate_y == best_y
-                        && candidate_x < best_x)
-                {
-                    best_x = candidate_x;
-                    best_y = candidate_y;
-                    best_height = resulting_height;
-                }
-            }
-
-            placements[ci] = (best_x, best_y);
-            for local_x in 0..shape.width {
-                let column = local_x as usize;
-                if shape.top[column] < shape.bottom[column] {
-                    continue;
-                }
-                let global_x = (best_x + local_x) as usize;
-                skyline[global_x] =
-                    skyline[global_x].max(best_y + shape.top[column] + 1);
-            }
-            packed_height = packed_height.max(best_height);
-        }
+        let placements = pack_profiles(&footprints, cancel).map_err(anyhow::Error::msg)?;
 
         // Convert cell placements back to world-space translations.
         for ci in 0..self.components.len() {
+            check_cancel(cancel)?;
             let (lo, _) = bounds[ci];
             let shape = &footprints[ci];
             let (px, py) = placements[ci];
@@ -1554,6 +1623,32 @@ impl Layout {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Restore positions only after validation; failed restores leave the layout
+    /// untouched. Manual placement remains settled and is never repacked.
+    pub fn restore_positions(&mut self, positions: &[Pos2]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            positions.len() == self.positions.len(),
+            "Saved layout has an incompatible position count"
+        );
+        anyhow::ensure!(
+            positions.iter().flatten().all(|v| v.is_finite()),
+            "Saved layout contains non-finite coordinates"
+        );
+        self.positions.copy_from_slice(positions);
+        self.refresh_pbd_rest_geometry();
+        self.user_positioned = true;
+        self.drag_component = None;
+        self.drag_anchor = None;
+        self.drag_lra.fill(f32::INFINITY);
+        self.disp.fill([0.0; 2]);
+        self.prev_drag_force.fill([0.0; 2]);
+        self.iteration = 0;
+        self.converged = true;
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
     }
 
     /// Capture the final layout geometry as the rest state for interactive
@@ -1581,8 +1676,7 @@ impl Layout {
         }
 
         for ci in 0..self.pbd_ring_paths.len() {
-            self.pbd_ring_area[ci] =
-                polygon_signed_area(&self.positions, &self.pbd_ring_paths[ci]);
+            self.pbd_ring_area[ci] = polygon_signed_area(&self.positions, &self.pbd_ring_paths[ci]);
         }
     }
 
@@ -1605,7 +1699,10 @@ impl Layout {
         self.drag_lra[pi] = 0.0;
 
         let mut heap = BinaryHeap::new();
-        heap.push(HeapState { cost: 0.0, node: pi });
+        heap.push(HeapState {
+            cost: 0.0,
+            node: pi,
+        });
 
         while let Some(HeapState { cost, node }) = heap.pop() {
             if cost > self.drag_lra[node] {
@@ -1672,25 +1769,11 @@ impl Layout {
 
             for &index in &self.pbd_component_distances[ci] {
                 let c = self.pbd_distances[index];
-                satisfy_distance_constraint(
-                    &mut self.positions,
-                    c.a,
-                    c.b,
-                    c.rest,
-                    pi,
-                    1.0,
-                );
+                satisfy_distance_constraint(&mut self.positions, c.a, c.b, c.rest, pi, 1.0);
             }
             for &index in self.pbd_component_distances[ci].iter().rev() {
                 let c = self.pbd_distances[index];
-                satisfy_distance_constraint(
-                    &mut self.positions,
-                    c.a,
-                    c.b,
-                    c.rest,
-                    pi,
-                    1.0,
-                );
+                satisfy_distance_constraint(&mut self.positions, c.a, c.b, c.rest, pi, 1.0);
             }
 
             for &index in &self.pbd_component_bends[ci] {
@@ -1731,6 +1814,7 @@ impl Layout {
         if !self.drag_pbd_to(pos, pi) {
             self.drag_to(pos, pi);
         }
+        self.converged = false;
     }
 
     /// Move a whole contig (or a circular assembly) without stretching it.
@@ -1749,8 +1833,8 @@ impl Layout {
         if self.circular[ci] {
             // Keep explicit circular assemblies intact when they are moved.
             for &node in &self.components[ci] {
-                for p in &mut self.positions
-                    [self.node_pts_start[node]..self.node_pts_start[node] + self.node_pts_count[node]]
+                for p in &mut self.positions[self.node_pts_start[node]
+                    ..self.node_pts_start[node] + self.node_pts_count[node]]
                 {
                     p[0] += delta[0];
                     p[1] += delta[1];
@@ -1765,8 +1849,7 @@ impl Layout {
             let grabbed_chain_idx = pi - start;
             for j in 0..count {
                 let index_distance = j.abs_diff(grabbed_chain_idx) as f32;
-                let drag_strength =
-                    2.0_f32.powf(-index_distance.powf(1.8) / DRAG_FALLOFF_STRENGTH);
+                let drag_strength = 2.0_f32.powf(-index_distance.powf(1.8) / DRAG_FALLOFF_STRENGTH);
                 let p = &mut self.positions[start + j];
                 p[0] += delta[0] * drag_strength;
                 p[1] += delta[1] * drag_strength;
@@ -1791,13 +1874,14 @@ impl Layout {
         }
         let _ = graph;
         let attractor = attractor.filter(|(_, pi)| *pi < total_pts);
+        if self.user_positioned && self.converged && attractor.is_none() {
+            return;
+        }
         if let Some((pos, pi)) = attractor {
             if !self.drag_pbd_to(pos, pi) {
                 self.drag_to(pos, pi);
             }
-            for force in &mut self.prev_drag_force {
-                *force = [0.0, 0.0];
-            }
+            self.prev_drag_force.fill([0.0, 0.0]);
             self.iteration += 1;
             self.converged = false;
             return;
@@ -1806,9 +1890,7 @@ impl Layout {
             // the manual placement instead of waking FMMM/FR on release.
             self.drag_anchor = None;
             self.drag_lra.fill(f32::INFINITY);
-            for force in &mut self.prev_drag_force {
-                *force = [0.0, 0.0];
-            }
+            self.prev_drag_force.fill([0.0, 0.0]);
             self.iteration += 1;
             self.converged = true;
             return;
@@ -1824,8 +1906,7 @@ impl Layout {
         // active grab, keep a larger non-decaying movement allowance so linked
         // segments can continue following even after a long or very large drag.
         let t0 = k * 0.25;
-        let progress =
-            (self.iteration as f32 / params.max_iter.max(1) as f32).clamp(0.0, 1.0);
+        let progress = (self.iteration as f32 / params.max_iter.max(1) as f32).clamp(0.0, 1.0);
         let temp = if attractor.is_some() {
             k * DRAG_MOVE_LIMIT_SCALE
         } else {
@@ -1852,9 +1933,7 @@ impl Layout {
         let grid_time = profile_start.elapsed();
         // ── Repulsion (parallel) ─────────────────────────────────────────────
         // Zero the reusable displacement buffer.
-        for d in &mut self.disp {
-            *d = [0.0, 0.0];
-        }
+        self.disp.fill([0.0, 0.0]);
 
         // Split borrows so the parallel closure can access immutable fields
         // while writing into `disp`.
@@ -2008,7 +2087,7 @@ impl Layout {
         let min_iter = (params.max_iter / 4).max(50);
         self.converged = (self.iteration >= min_iter && max_move < k * 0.005)
             || self.iteration >= params.max_iter;
-        if !self.user_positioned && (self.iteration % 20 == 0 || self.converged) {
+        if !self.user_positioned && (self.iteration.is_multiple_of(20) || self.converged) {
             self.pack_components();
         }
     }
@@ -2111,7 +2190,16 @@ impl LayoutRunner {
         backend: LayoutBackend,
         publish_interval: std::time::Duration,
     ) -> Self {
-        let mut local = Layout::new_with_graph_backend(&graph, backend);
+        let layout = Layout::new_with_graph_backend(&graph, backend);
+        Self::from_layout(graph, params, layout, publish_interval)
+    }
+
+    pub fn from_layout(
+        graph: Arc<ViewGraph>,
+        params: LayoutParams,
+        mut local: Layout,
+        publish_interval: std::time::Duration,
+    ) -> Self {
         let layout = Arc::new(Mutex::new(local.clone()));
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let attractor = Arc::new(Mutex::new(DragState::default()));
@@ -2181,7 +2269,13 @@ impl LayoutRunner {
     }
 
     pub fn snapshot(&self) -> Option<Layout> {
-        self.layout.lock().ok().map(|g| g.clone())
+        self.layout.lock().ok().map(|layout| layout.clone())
+    }
+
+    pub fn snapshot_changed(&self, target: &Layout) -> bool {
+        self.layout
+            .try_lock()
+            .is_ok_and(|shared| target.revision != shared.revision)
     }
 
     pub fn update_snapshot(&self, target: &mut Layout) -> bool {
@@ -2290,11 +2384,7 @@ mod tests {
         }
     }
 
-    fn assert_pbd_local_residual_bounded(
-        layout: &Layout,
-        ci: usize,
-        max_relative_error: f32,
-    ) {
+    fn assert_pbd_local_residual_bounded(layout: &Layout, ci: usize, max_relative_error: f32) {
         for &index in &layout.pbd_component_distances[ci] {
             let c = layout.pbd_distances[index];
             let a = layout.positions[c.a];
@@ -2309,6 +2399,168 @@ mod tests {
                 c.rest
             );
         }
+    }
+
+    fn reference_pack_profiles(shapes: &[PackFootprint]) -> Vec<(i32, i32)> {
+        let area: f32 = shapes.iter().map(|s| (s.width * s.height) as f32).sum();
+        let width = (area * PACK_TARGET_ASPECT).sqrt().ceil() as i32;
+        let width = width.max(shapes.iter().map(|s| s.width).max().unwrap());
+        let mut skyline = vec![0; width as usize];
+        let mut reference = Vec::new();
+        let mut packed_height = 0;
+        for shape in shapes {
+            let (height, y, x) = (0..=width - shape.width)
+                .map(|x| {
+                    let y = (0..shape.width as usize)
+                        .filter(|&c| shape.bottom[c] <= shape.top[c])
+                        .map(|c| skyline[x as usize + c] - shape.bottom[c])
+                        .max()
+                        .unwrap_or(0)
+                        .max(0);
+                    let height = (0..shape.width as usize)
+                        .filter(|&c| shape.bottom[c] <= shape.top[c])
+                        .map(|c| y + shape.top[c] + 1)
+                        .max()
+                        .unwrap_or(0)
+                        .max(packed_height);
+                    (height, y, x)
+                })
+                .min()
+                .unwrap();
+            reference.push((x, y));
+            for c in 0..shape.width as usize {
+                if shape.bottom[c] <= shape.top[c] {
+                    skyline[x as usize + c] = skyline[x as usize + c].max(y + shape.top[c] + 1);
+                }
+            }
+            packed_height = height;
+        }
+        reference
+    }
+
+    #[test]
+    fn skyline_matches_exhaustive_placements_without_overlap() {
+        // Mixed widths, sloped envelopes and empty columns exercise shapes
+        // for which rectangular bounding boxes are deliberately too strict.
+        let shapes: Vec<_> = (0..180)
+            .map(|i| {
+                let width = 1 + i % 23;
+                let mut bottom = Vec::new();
+                let mut top = Vec::new();
+                for x in 0..width {
+                    let lo = (i * 7 + x * 3) % 11;
+                    bottom.push(lo);
+                    top.push(if x > 0 && (i + x) % 5 == 0 {
+                        lo - 1
+                    } else {
+                        lo + (i % 9)
+                    });
+                }
+                finish_pack_profile(bottom, top)
+            })
+            .collect();
+        let reference = reference_pack_profiles(&shapes);
+        let placements = pack_profiles(&shapes, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            placements, reference,
+            "packing order and tie-breaks changed"
+        );
+        let mut occupied = HashSet::new();
+        for (shape, &(x, y)) in shapes.iter().zip(&placements) {
+            for c in 0..shape.width as usize {
+                for row in shape.bottom[c]..=shape.top[c] {
+                    assert!(
+                        occupied.insert((x + c as i32, y + row)),
+                        "component envelopes overlap"
+                    );
+                }
+            }
+        }
+        assert_eq!(placements[0], (0, 0));
+        assert!(pack_profiles(&shapes, &AtomicBool::new(true)).is_err());
+    }
+
+    #[test]
+    #[ignore = "performance comparison; run with benchmarks/benchmark_packing.py"]
+    fn packing_benchmark() {
+        use std::time::Instant;
+        let repeats = std::env::var("GRAPHITE_PACKING_REPEATS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(3)
+            .clamp(1, 10);
+        for count in [1_000usize, 10_000, 50_000] {
+            let shapes: Vec<_> = (0..count)
+                .map(|i| {
+                    let width = 7 + i % 19;
+                    finish_pack_profile(
+                        (0..width).map(|x| ((x + i) % 4) as i32).collect(),
+                        (0..width).map(|x| (6 + (x + i) % 5) as i32).collect(),
+                    )
+                })
+                .collect();
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for _ in 0..repeats {
+                let start = Instant::now();
+                let reference = std::hint::black_box(reference_pack_profiles(&shapes));
+                before.push(start.elapsed().as_secs_f64() * 1000.0);
+                let start = Instant::now();
+                let optimized =
+                    std::hint::black_box(pack_profiles(&shapes, &AtomicBool::new(false)).unwrap());
+                after.push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(reference, optimized);
+            }
+            before.sort_by(f64::total_cmp);
+            after.sort_by(f64::total_cmp);
+            println!(
+                "PACKING components={count} repeats={repeats} reference_ms={:.3} optimized_ms={:.3} speedup={:.2} identical=true",
+                before[repeats / 2],
+                after[repeats / 2],
+                before[repeats / 2] / after[repeats / 2]
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_initialization_and_validated_restore() {
+        use Strand::Forward as F;
+        let graph = graph(&[100.0, 200.0, 300.0], &[(0, F, 1, F)]);
+        let cancelled = AtomicBool::new(true);
+        assert!(
+            Layout::try_new_with_graph_backend(&graph, LayoutBackend::Rust, &cancelled).is_err()
+        );
+        let mut layout = Layout::new_with_graph(&graph);
+        let before = layout.positions.clone();
+        assert!(
+            layout
+                .restore_positions(&before[..before.len() - 1])
+                .is_err()
+        );
+        let mut invalid = before.clone();
+        invalid[0][0] = f32::NAN;
+        assert!(layout.restore_positions(&invalid).is_err());
+        assert_eq!(
+            layout.positions, before,
+            "invalid restore mutated the layout"
+        );
+
+        let saved: Vec<_> = before
+            .iter()
+            .map(|p| [p[0] - 900.0, p[1] + 230.0])
+            .collect();
+        let mut restored =
+            Layout::try_from_positions(&graph, &saved, &AtomicBool::new(false)).unwrap();
+        assert_eq!(restored.positions, saved);
+        assert!(restored.converged && restored.user_positioned);
+        restored.step(&graph, &LayoutParams::default(), None);
+        assert_eq!(
+            restored.positions, saved,
+            "saved positions were repacked or relaxed"
+        );
+        let grabbed = restored.node_pts_start[0];
+        assert!(restored.drag_pbd_to([saved[grabbed][0] + 20.0, saved[grabbed][1]], grabbed));
+        assert!(restored.positions.iter().flatten().all(|p| p.is_finite()));
     }
 
     #[test]
@@ -2377,7 +2629,10 @@ mod tests {
         let before = layout.pts(0).to_vec();
         let start = layout.node_pts_start[0];
         let pi = start + layout.node_pts_count[0] / 2;
-        let target = [layout.positions[pi][0] + 500.0, layout.positions[pi][1] + 250.0];
+        let target = [
+            layout.positions[pi][0] + 500.0,
+            layout.positions[pi][1] + 250.0,
+        ];
         layout.step(&graph, &LayoutParams::default(), Some((target, pi)));
 
         assert_eq!(layout.positions[pi], target);
@@ -2387,7 +2642,10 @@ mod tests {
         let end_move = (layout.positions[start][0] - before[0][0])
             .hypot(layout.positions[start][1] - before[0][1]);
 
-        assert!(end_move > 0.0, "the rest of the contig should follow the grab");
+        assert!(
+            end_move > 0.0,
+            "the rest of the contig should follow the grab"
+        );
         assert!(
             end_move < grabbed_move,
             "drag falloff should let the grabbed contig bend instead of translating rigidly"
@@ -2450,12 +2708,17 @@ mod tests {
         ];
         assert!(layout.drag_pbd_to(target, grabbed));
         assert_eq!(layout.positions[grabbed], target);
-        assert!(layout.positions.iter().flatten().all(|value| value.is_finite()));
+        assert!(
+            layout
+                .positions
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
 
         let follower_after = layout.center(3);
         assert!(
-            (follower_after[0] - follower_before[0])
-                .hypot(follower_after[1] - follower_before[1])
+            (follower_after[0] - follower_before[0]).hypot(follower_after[1] - follower_before[1])
                 > 0.1,
             "a connected branch should follow the grab"
         );
@@ -2491,7 +2754,13 @@ mod tests {
         // oval while remaining globally bounded by LRA and retaining an open
         // enclosed area. Individual local constraints can therefore have a
         // larger residual than in linear or branched components.
-        assert!(layout.positions.iter().flatten().all(|value| value.is_finite()));
+        assert!(
+            layout
+                .positions
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        );
 
         let area = polygon_signed_area(&layout.positions, &layout.pbd_ring_paths[ci]).abs();
         assert!(
@@ -2536,8 +2805,8 @@ mod tests {
         }
 
         let follower_after = layout.center(2);
-        let follower_move = (follower_after[0] - follower_before[0])
-            .hypot(follower_after[1] - follower_before[1]);
+        let follower_move =
+            (follower_after[0] - follower_before[0]).hypot(follower_after[1] - follower_before[1]);
 
         assert_eq!(layout.positions[grabbed], target);
         assert!(
@@ -2566,9 +2835,19 @@ mod tests {
         for _ in 0..steps {
             layout.step(&graph, &LayoutParams::default(), None);
         }
-        eprintln!("{}: {} segments, {} links, {} components, {} rings, {} physics points; parse {:?}, initial layout {:?}, {} steps {:?}",
-            path, graph.nodes.len(), graph.edges.len(), layout.components.len(),
-            layout.circular.iter().filter(|&&v| v).count(), layout.positions.len(), parse_time, init, steps, start.elapsed());
+        eprintln!(
+            "{}: {} segments, {} links, {} components, {} rings, {} physics points; parse {:?}, initial layout {:?}, {} steps {:?}",
+            path,
+            graph.nodes.len(),
+            graph.edges.len(),
+            layout.components.len(),
+            layout.circular.iter().filter(|&&v| v).count(),
+            layout.positions.len(),
+            parse_time,
+            init,
+            steps,
+            start.elapsed()
+        );
         assert!(layout.positions.iter().flatten().all(|v| v.is_finite()));
         if let Ok(output) = std::env::var("GFA_BENCH_OUTPUT") {
             let file = std::io::BufWriter::new(std::fs::File::create(output).unwrap());
