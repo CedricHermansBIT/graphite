@@ -590,13 +590,15 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
         }
     }
 
+    let numeric_name_index = build_numeric_name_index(&segments);
+    let numeric_names = numeric_name_index.as_deref();
     let mut skipped_links = 0usize;
     let mut links = Vec::with_capacity(links_raw.len());
     for (line_number, raw) in links_raw {
         check_cancelled(cancel)?;
         let (Some(from), Some(to)) = (
-            resolve_name(&mmap, &raw.from_name, &name_index),
-            resolve_name(&mmap, &raw.to_name, &name_index),
+            resolve_name(&mmap, &raw.from_name, &name_index, numeric_names),
+            resolve_name(&mmap, &raw.to_name, &name_index, numeric_names),
         ) else {
             skipped_links += 1;
             warn(
@@ -621,8 +623,8 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
     for (line_number, raw) in jumps_raw {
         check_cancelled(cancel)?;
         let (Some(from), Some(to)) = (
-            resolve_name(&mmap, &raw.from_name, &name_index),
-            resolve_name(&mmap, &raw.to_name, &name_index),
+            resolve_name(&mmap, &raw.from_name, &name_index, numeric_names),
+            resolve_name(&mmap, &raw.to_name, &name_index, numeric_names),
         ) else {
             skipped_jumps += 1;
             warn(
@@ -648,8 +650,8 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
     for (line_number, raw) in containments_raw {
         check_cancelled(cancel)?;
         let (Some(container), Some(contained)) = (
-            resolve_name(&mmap, &raw.container_name, &name_index),
-            resolve_name(&mmap, &raw.contained_name, &name_index),
+            resolve_name(&mmap, &raw.container_name, &name_index, numeric_names),
+            resolve_name(&mmap, &raw.contained_name, &name_index, numeric_names),
         ) else {
             skipped_containments += 1;
             warn(
@@ -681,7 +683,8 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
             if step_index & 0xffff == 0 {
                 check_cancelled(cancel)?;
             }
-            let Some(segment) = resolve_name(&mmap, &step.name_range, &name_index) else {
+            let Some(segment) = resolve_name(&mmap, &step.name_range, &name_index, numeric_names)
+            else {
                 valid = false;
                 break;
             };
@@ -720,7 +723,8 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
             if step_index & 0xffff == 0 {
                 check_cancelled(cancel)?;
             }
-            let Some(segment) = resolve_name(&mmap, &step.name_range, &name_index) else {
+            let Some(segment) = resolve_name(&mmap, &step.name_range, &name_index, numeric_names)
+            else {
                 valid = false;
                 break;
             };
@@ -1437,12 +1441,52 @@ fn parse_walk_step_field(
     true
 }
 
+fn canonical_decimal_id(name: &[u8]) -> Option<usize> {
+    if name.is_empty() || (name.len() > 1 && name[0] == b'0') {
+        return None;
+    }
+    name.iter().try_fold(0usize, |id, &digit| {
+        digit
+            .is_ascii_digit()
+            .then(|| digit - b'0')
+            .and_then(|digit| id.checked_mul(10)?.checked_add(digit as usize))
+    })
+}
+
+fn build_numeric_name_index(segments: &[Segment]) -> Option<Vec<usize>> {
+    let mut ids = Vec::with_capacity(segments.len());
+    let mut max_id = 0usize;
+    for segment in segments {
+        let id = canonical_decimal_id(segment.name.as_bytes())?;
+        max_id = max_id.max(id);
+        ids.push(id);
+    }
+    // Sparse or very large identifiers should use the existing hash index.
+    if max_id > segments.len().saturating_mul(4).saturating_add(1024) {
+        return None;
+    }
+    let mut index = vec![usize::MAX; max_id.checked_add(1)?];
+    for (segment, id) in ids.into_iter().enumerate() {
+        index[id] = segment;
+    }
+    Some(index)
+}
+
 fn resolve_name(
     mmap: &[u8],
     name_range: &Range<usize>,
     name_index: &AHashMap<Arc<str>, usize>,
+    numeric_names: Option<&[usize]>,
 ) -> Option<usize> {
-    let name = std::str::from_utf8(&mmap[name_range.clone()]).ok()?;
+    let bytes = &mmap[name_range.clone()];
+    if let Some(index) = numeric_names {
+        let id = canonical_decimal_id(bytes)?;
+        return index
+            .get(id)
+            .copied()
+            .filter(|&segment| segment != usize::MAX);
+    }
+    let name = std::str::from_utf8(bytes).ok()?;
     name_index.get(name).copied()
 }
 
@@ -1553,6 +1597,23 @@ mod tests {
             &graph.mmap[graph.paths[0].overlaps_range.clone()],
             b"1M,10J"
         );
+    }
+
+    #[test]
+    fn resolves_dense_decimal_names_without_conflating_spelling() {
+        let graph =
+            parse(b"S\t1\tA\nS\t2\tT\nL\t1\t+\t2\t-\t0M\nP\tgood\t1+,2-\t*\nP\tbad\t01+\t*\n");
+        assert_eq!(graph.links.len(), 1);
+        assert_eq!(graph.links[0].from, 0);
+        assert_eq!(graph.links[0].to, 1);
+        assert_eq!(graph.paths.len(), 1);
+        assert_eq!(graph.path_steps(&graph.paths[0])[1].segment, 1);
+        assert_eq!(graph.diagnostics.len(), 1);
+        assert_eq!(graph.diagnostics[0].line, 5);
+
+        let graph = parse(b"S\t01\tA\nS\t1\tT\nP\tp\t01+,1+\t*\n");
+        assert_eq!(graph.path_steps(&graph.paths[0])[0].segment, 0);
+        assert_eq!(graph.path_steps(&graph.paths[0])[1].segment, 1);
     }
 
     #[test]
