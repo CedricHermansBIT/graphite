@@ -14,12 +14,13 @@ path = "src/main.rs"
 [features]
 default = []
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+cuda = ["gpu", "dep:cudarc"]
 # Optional Bandage/OGDF reference backend. Enabling this feature requires the
 # Bandage submodule and a C++14 compiler; the default Rust-only build does not.
 ogdf = ["dep:cc"]
 
 [dependencies]
-eframe = { version = "0.36.2", features = ["default", "persistence"] }
+eframe = { version = "0.36.2", features = ["default", "persistence", "glow"] }
 egui = "0.36.2"
 rayon = "1.12.0"
 ahash = "0.8"
@@ -41,6 +42,7 @@ same-file = "1"
 wgpu = { version = "30.0.1", optional = true }
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }
+cudarc = { version = "0.19.9", optional = true, default-features = false, features = ["driver", "nvrtc", "dynamic-loading", "cuda-12000"] }
 
 [profile.release]
 opt-level = 3

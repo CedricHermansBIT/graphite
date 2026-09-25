@@ -1,6 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+#[cfg(feature = "cuda")]
+mod cuda_layout;
 mod export;
 mod filter;
 mod gfa;
@@ -239,6 +241,14 @@ fn main() -> Result<()> {
     let backend = parse_layout_backend(&args.layout_backend)?;
 
     let native_options = eframe::NativeOptions {
+        // The layout compute device is independent of the display renderer.
+        // A compute-only device can accelerate layout without presenting a window.
+        #[cfg(feature = "gpu")]
+        renderer: if backend == layout::LayoutBackend::Gpu {
+            eframe::Renderer::Glow
+        } else {
+            eframe::Renderer::Wgpu
+        },
         viewport: egui::ViewportBuilder::default()
             .with_title("Graphite")
             .with_inner_size([1400.0, 900.0])

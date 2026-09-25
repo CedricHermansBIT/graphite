@@ -106,35 +106,23 @@ Requesting `--layout-backend bandage` from a Rust-only build prints an error exp
 ### Experimental GPU layout
 
 On the `experiment/gpu-layout` branch, build with `--features gpu` and select
-`--layout-backend gpu` to run Barnes–Hut repulsion through a `wgpu` compute
-shader. The backend uses Vulkan on Linux, Metal on macOS, or Direct3D 12 on
-Windows, subject to a working compute-capable adapter and driver. It does not
-require an NVIDIA GPU or CUDA.
+`--layout-backend gpu` to run Barnes–Hut repulsion on a compute device. The
+backend uses `wgpu` through Vulkan, Metal, or Direct3D 12. The optional `cuda`
+feature tries CUDA first, then `wgpu`. A working compute device and driver are
+required. The UI renderer is independent of layout compute; GPU layout uses
+eframe's OpenGL renderer.
 
 ```bash
 cargo build --release --features gpu
 ./target/release/graphite --layout-backend gpu path/to/assembly.gfa
 ```
 
+For NVIDIA CUDA devices, build with `--features cuda` instead.
+
 This is a correctness prototype. Tree construction, attraction, and integration
 still run on the CPU; each repulsion pass uploads the tree and positions, then
-reads forces back. A speedup is not established. On the development H100 host,
-the NVIDIA Vulkan driver currently fails during device creation. Small shader
-and layout tests passed using the software Vulkan driver (`llvmpipe`).
-
-On that host, the same Vulkan failure also prevents eframe's default UI
-renderer from starting, even with `--layout-backend rust`. To launch the UI
-using Mesa's software Vulkan driver, run:
-
-```bash
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
-  ./target/release/graphite --layout-backend rust path/to/assembly.gfa
-```
-
-This runs the UI on the CPU and does not accelerate layout on the H100. The
-experimental `gpu` backend can be substituted for `rust` to test correctness
-through `llvmpipe`; H100 acceleration would need a working Vulkan device or a
-separate CUDA compute backend.
+reads forces back. A speedup is not established. Software Vulkan adapters are
+rejected unless `GRAPHITE_ALLOW_SOFTWARE_GPU=1` is set for testing.
 
 For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and repaint traffic:
 

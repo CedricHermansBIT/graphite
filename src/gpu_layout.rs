@@ -39,7 +39,13 @@ mod enabled {
         padding: [u32; 2],
     }
 
-    pub struct GpuRepulsion {
+    pub enum GpuRepulsion {
+        #[cfg(feature = "cuda")]
+        Cuda(crate::cuda_layout::CudaRepulsion),
+        Wgpu(WgpuRepulsion),
+    }
+
+    pub struct WgpuRepulsion {
         device: wgpu::Device,
         queue: wgpu::Queue,
         pipeline: wgpu::ComputePipeline,
@@ -47,6 +53,43 @@ mod enabled {
 
     impl GpuRepulsion {
         pub fn new() -> anyhow::Result<Self> {
+            #[cfg(feature = "cuda")]
+            let cuda_error = match crate::cuda_layout::CudaRepulsion::new() {
+                Ok(cuda) => return Ok(Self::Cuda(cuda)),
+                Err(error) => error,
+            };
+            #[cfg(feature = "cuda")]
+            {
+                WgpuRepulsion::new().map(Self::Wgpu).map_err(|wgpu_error| {
+                    anyhow::anyhow!(
+                        "no usable GPU compute backend; CUDA: {cuda_error:#}; wgpu: {wgpu_error:#}"
+                    )
+                })
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                WgpuRepulsion::new().map(Self::Wgpu)
+            }
+        }
+
+        pub fn evaluate(
+            &self,
+            nodes: &[QuadNode],
+            ordered: &[MortonPoint],
+            positions: &[Pos2],
+            theta: f32,
+            output: &mut [Pos2],
+        ) -> Result<(), &'static str> {
+            match self {
+                #[cfg(feature = "cuda")]
+                Self::Cuda(cuda) => cuda.evaluate(nodes, ordered, positions, theta, output),
+                Self::Wgpu(wgpu) => wgpu.evaluate(nodes, ordered, positions, theta, output),
+            }
+        }
+    }
+
+    impl WgpuRepulsion {
+        fn new() -> anyhow::Result<Self> {
             let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
             descriptor.backends = wgpu::Backends::PRIMARY;
             let instance = wgpu::Instance::new(descriptor);
@@ -59,6 +102,13 @@ mod enabled {
                 }))
                 .context("no compatible GPU compute adapter was found")?;
             let adapter_info = adapter.get_info();
+            if adapter_info.device_type == wgpu::DeviceType::Cpu
+                && std::env::var_os("GRAPHITE_ALLOW_SOFTWARE_GPU").is_none()
+            {
+                anyhow::bail!(
+                    "only a software Vulkan adapter was found; set GRAPHITE_ALLOW_SOFTWARE_GPU=1 to test it explicitly"
+                );
+            }
             let adapter_name = adapter_info.name;
             log::info!(
                 "GPU layout selected {} via {:?}",
