@@ -717,7 +717,6 @@ fn run_force_iterations(
     let average_ideal = mean_edge_length(level).max(1.0);
     let mut attraction = vec![[0.0f32; 2]; positions.len()];
     let mut repulsion = vec![[0.0f32; 2]; positions.len()];
-    let mut movement = vec![[0.0f32; 2]; positions.len()];
     let mut previous_movement = vec![[0.0f32; 2]; positions.len()];
     let mut tree = BarnesHutTree::default();
 
@@ -801,42 +800,33 @@ fn run_force_iterations(
         }
         .max(0.01);
 
-        movement.par_iter_mut().enumerate().for_each(|(node, out)| {
-            let fx = scale
-                * (spring_strength * attraction[node][0] + repulsion_strength * repulsion[node][0]);
-            let fy = scale
-                * (spring_strength * attraction[node][1] + repulsion_strength * repulsion[node][1]);
-            let norm = (fx * fx + fy * fy).sqrt();
-            if norm <= EPSILON {
-                *out = [0.0, 0.0];
-                return;
-            }
-            let allowed = (norm * cool_factor * FORCE_SCALING).min(max_radius);
-            *out = [fx / norm * allowed, fy / norm * allowed];
-        });
-
-        if iteration > 0 {
-            movement
-                .par_iter_mut()
-                .zip(previous_movement.par_iter())
-                .for_each(|(new, old)| prevent_oscillation(new, *old));
-        }
-
-        let average_move = movement
-            .par_iter()
-            .map(|m| (m[0] * m[0] + m[1] * m[1]).sqrt())
-            .sum::<f32>()
-            / positions.len() as f32;
-
-        positions
+        let average_move = positions
             .par_iter_mut()
-            .zip(movement.par_iter())
-            .for_each(|(position, delta)| {
+            .zip(previous_movement.par_iter_mut())
+            .zip(attraction.par_iter())
+            .zip(repulsion.par_iter())
+            .map(|(((position, previous), attraction), repulsion)| {
+                let fx =
+                    scale * (spring_strength * attraction[0] + repulsion_strength * repulsion[0]);
+                let fy =
+                    scale * (spring_strength * attraction[1] + repulsion_strength * repulsion[1]);
+                let norm = (fx * fx + fy * fy).sqrt();
+                let mut delta = if norm <= EPSILON {
+                    [0.0, 0.0]
+                } else {
+                    let allowed = (norm * cool_factor * FORCE_SCALING).min(max_radius);
+                    [fx / norm * allowed, fy / norm * allowed]
+                };
+                if iteration > 0 {
+                    prevent_oscillation(&mut delta, *previous);
+                }
                 position[0] += delta[0];
                 position[1] += delta[1];
-            });
-
-        previous_movement.clone_from_slice(&movement);
+                *previous = delta;
+                (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+            })
+            .sum::<f32>()
+            / positions.len() as f32;
 
         if iteration % 8 == 7 {
             center(positions);
