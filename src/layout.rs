@@ -499,6 +499,8 @@ pub enum LayoutBackend {
     #[cfg(feature = "ogdf")]
     Bandage,
     Rust,
+    #[cfg(feature = "gpu")]
+    Gpu,
 }
 
 impl LayoutBackend {
@@ -507,6 +509,8 @@ impl LayoutBackend {
             #[cfg(feature = "ogdf")]
             "bandage" | "ogdf" => Some(Self::Bandage),
             "rust" => Some(Self::Rust),
+            #[cfg(feature = "gpu")]
+            "gpu" => Some(Self::Gpu),
             _ => None,
         }
     }
@@ -516,6 +520,8 @@ impl LayoutBackend {
             #[cfg(feature = "ogdf")]
             Self::Bandage => "bandage",
             Self::Rust => "rust",
+            #[cfg(feature = "gpu")]
+            Self::Gpu => "gpu",
         }
     }
 }
@@ -705,6 +711,7 @@ impl Layout {
         Self::new_with_graph_backend(graph, LayoutBackend::Rust)
     }
 
+    #[cfg(test)]
     pub fn new_with_graph_backend(graph: &ViewGraph, backend: LayoutBackend) -> Self {
         Self::try_new_with_graph_backend(graph, backend, &AtomicBool::new(false))
             .expect("uncancelled layout initialization")
@@ -1238,6 +1245,8 @@ impl Layout {
             #[cfg(feature = "ogdf")]
             LayoutBackend::Bandage => layout.seed_with_bandage(graph),
             LayoutBackend::Rust => layout.seed_with_rust(graph, cancel)?,
+            #[cfg(feature = "gpu")]
+            LayoutBackend::Gpu => layout.seed_with_gpu(graph, cancel)?,
         };
         check_cancel(cancel)?;
         layout.orient_tall_components();
@@ -1343,6 +1352,21 @@ impl Layout {
     /// Use Graphite's Rust multilevel Barnes-Hut backend on the same reduced
     /// representation passed to Bandage/OGDF.
     fn seed_with_rust(&mut self, graph: &ViewGraph, cancel: &AtomicBool) -> anyhow::Result<bool> {
+        self.seed_with_rust_inner(graph, cancel, None)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn seed_with_gpu(&mut self, graph: &ViewGraph, cancel: &AtomicBool) -> anyhow::Result<bool> {
+        let gpu = crate::gpu_layout::GpuRepulsion::new()?;
+        self.seed_with_rust_inner(graph, cancel, Some(&gpu))
+    }
+
+    fn seed_with_rust_inner(
+        &mut self,
+        graph: &ViewGraph,
+        cancel: &AtomicBool,
+        gpu: Option<&crate::gpu_layout::GpuRepulsion>,
+    ) -> anyhow::Result<bool> {
         check_cancel(cancel)?;
         if self.active_points.is_empty() {
             return Ok(true);
@@ -1420,7 +1444,7 @@ impl Layout {
         }
         let initial: Vec<Pos2> = samples.iter().map(|&pi| self.positions[pi]).collect();
         let mut output = vec![[0.0_f32; 2]; samples.len()];
-        if let Err(error) = rust_layout::initial_layout_cancellable(
+        if let Err(error) = rust_layout::initial_layout_cancellable_with_gpu(
             output.len(),
             &from,
             &to,
@@ -1428,8 +1452,12 @@ impl Layout {
             &initial,
             &mut output,
             cancel,
+            gpu,
         ) {
             check_cancel(cancel)?;
+            if gpu.is_some() {
+                anyhow::bail!("GPU initial layout failed: {error}");
+            }
             log::warn!("Rust initial layout failed ({error}); using fallback placement");
             return Ok(false);
         }

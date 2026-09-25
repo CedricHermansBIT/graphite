@@ -140,6 +140,7 @@ pub fn initial_layout(
     )
 }
 
+#[cfg(test)]
 pub fn initial_layout_cancellable(
     node_count: usize,
     from: &[u32],
@@ -148,6 +149,29 @@ pub fn initial_layout_cancellable(
     initial_positions: &[Pos2],
     output: &mut [Pos2],
     cancel: &AtomicBool,
+) -> Result<(), &'static str> {
+    initial_layout_cancellable_with_gpu(
+        node_count,
+        from,
+        to,
+        lengths,
+        initial_positions,
+        output,
+        cancel,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn initial_layout_cancellable_with_gpu(
+    node_count: usize,
+    from: &[u32],
+    to: &[u32],
+    lengths: &[f32],
+    initial_positions: &[Pos2],
+    output: &mut [Pos2],
+    cancel: &AtomicBool,
+    gpu: Option<&crate::gpu_layout::GpuRepulsion>,
 ) -> Result<(), &'static str> {
     check_cancel(cancel)?;
     if from.len() != to.len()
@@ -168,7 +192,7 @@ pub fn initial_layout_cancellable(
 
     let solved: Vec<ComponentResult> = components
         .into_par_iter()
-        .map(|work| solve_component(work, cancel))
+        .map(|work| solve_component(work, cancel, gpu))
         .collect::<Result<_, _>>()?;
     check_cancel(cancel)?;
 
@@ -285,6 +309,7 @@ fn split_components(
 fn solve_component(
     work: ComponentWork,
     cancel: &AtomicBool,
+    gpu: Option<&crate::gpu_layout::GpuRepulsion>,
 ) -> Result<ComponentResult, &'static str> {
     check_cancel(cancel)?;
     let node_count = work.global_nodes.len();
@@ -303,7 +328,7 @@ fn solve_component(
             let length = work.edges.first().map_or(100.0, |edge| edge.desired);
             vec![[-0.5 * length, 0.0], [0.5 * length, 0.0]]
         }
-        _ => solve_multilevel(node_count, work.edges, component_seed, cancel)?,
+        _ => solve_multilevel(node_count, work.edges, component_seed, cancel, gpu)?,
     };
 
     Ok(ComponentResult {
@@ -317,6 +342,7 @@ fn solve_multilevel(
     edges: Vec<Edge>,
     component_seed: u64,
     cancel: &AtomicBool,
+    gpu: Option<&crate::gpu_layout::GpuRepulsion>,
 ) -> Result<Vec<Pos2>, &'static str> {
     check_cancel(cancel)?;
     let mut levels = vec![Level {
@@ -353,12 +379,13 @@ fn solve_multilevel(
     let mut positions = deterministic_random_seed(coarsest.node_count, natural, component_seed);
     let iterations =
         multilevel_iterations(max_level, max_level, coarsest.node_count, base_iterations);
-    run_force_iterations(
+    run_force_iterations_with_gpu(
         coarsest,
         &mut positions,
         iterations,
         ForcePhase::Normal,
         cancel,
+        gpu,
     )?;
 
     for level_index in (0..max_level).rev() {
@@ -375,12 +402,13 @@ fn solve_multilevel(
         );
         let iterations =
             multilevel_iterations(level_index, max_level, level.node_count, base_iterations);
-        run_force_iterations(
+        run_force_iterations_with_gpu(
             level,
             &mut positions,
             iterations,
             ForcePhase::Normal,
             cancel,
+            gpu,
         )?;
     }
 
@@ -392,17 +420,18 @@ fn solve_multilevel(
     // full-resolution post phase too, while retaining the original ten
     // iterations for smaller graphs where they are inexpensive.
     let post_iterations = if node_count > 50_000 { 5 } else { 10 };
-    run_force_iterations(
+    run_force_iterations_with_gpu(
         &levels[0],
         &mut positions,
         post_iterations,
         ForcePhase::Post,
         cancel,
+        gpu,
     )?;
     rescale_to_ideal_edge_length(&levels[0], &mut positions);
 
     if fine_tuning_iterations > 0 {
-        run_force_iterations(
+        run_force_iterations_with_gpu(
             &levels[0],
             &mut positions,
             fine_tuning_iterations,
@@ -410,6 +439,7 @@ fn solve_multilevel(
                 total: fine_tuning_iterations,
             },
             cancel,
+            gpu,
         )?;
         rescale_to_ideal_edge_length(&levels[0], &mut positions);
     }
@@ -702,12 +732,24 @@ enum ForcePhase {
     Fine { total: usize },
 }
 
+#[cfg(test)]
 fn run_force_iterations(
     level: &Level,
     positions: &mut [Pos2],
     iterations: usize,
     phase: ForcePhase,
     cancel: &AtomicBool,
+) -> Result<(), &'static str> {
+    run_force_iterations_with_gpu(level, positions, iterations, phase, cancel, None)
+}
+
+fn run_force_iterations_with_gpu(
+    level: &Level,
+    positions: &mut [Pos2],
+    iterations: usize,
+    phase: ForcePhase,
+    cancel: &AtomicBool,
+    gpu: Option<&crate::gpu_layout::GpuRepulsion>,
 ) -> Result<(), &'static str> {
     check_cancel(cancel)?;
     if positions.len() <= 1 || iterations == 0 {
@@ -767,15 +809,19 @@ fn run_force_iterations(
             current_box_length(positions)
         } else {
             tree.rebuild(positions, cancel)?;
-            repulsion
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(target, force)| {
-                    if cancel.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    *force = tree.repulsion(target, positions, THETA);
-                });
+            if let Some(gpu) = gpu {
+                gpu.evaluate(&tree.nodes, &tree.ordered, positions, THETA, &mut repulsion)?;
+            } else {
+                repulsion
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(target, force)| {
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        *force = tree.repulsion(target, positions, THETA);
+                    });
+            }
             tree.box_length
         };
 
@@ -1079,14 +1125,14 @@ fn segments_cross(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
 // ── Barnes-Hut repulsion ─────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-struct QuadNode {
-    center: Pos2,
-    half: f32,
-    charge: f32,
-    center_of_charge: Pos2,
-    first: u32,
-    end: u32,
-    children: [i32; 4],
+pub(crate) struct QuadNode {
+    pub(crate) center: Pos2,
+    pub(crate) half: f32,
+    pub(crate) charge: f32,
+    pub(crate) center_of_charge: Pos2,
+    pub(crate) first: u32,
+    pub(crate) end: u32,
+    pub(crate) children: [i32; 4],
 }
 
 impl QuadNode {
@@ -1113,9 +1159,9 @@ impl QuadNode {
 }
 
 #[derive(Clone, Copy)]
-struct MortonPoint {
-    code: u64,
-    index: u32,
+pub(crate) struct MortonPoint {
+    pub(crate) code: u64,
+    pub(crate) index: u32,
 }
 
 #[derive(Default)]
@@ -1593,5 +1639,66 @@ mod tests {
         assert!(tree.nodes.len() <= MORTON_BITS + 1);
         assert_eq!(tree.nodes[0].charge, 10_000.0);
         assert_eq!(tree.repulsion(0, &positions, THETA), [0.0, 0.0]);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_repulsion_agrees_with_cpu_on_small_tree() {
+        let mut positions = deterministic_random_seed(513, 100.0, 91);
+        positions[17] = positions[18];
+        let mut tree = BarnesHutTree::default();
+        tree.rebuild(&positions, &AtomicBool::new(false)).unwrap();
+        let Ok(gpu) = crate::gpu_layout::GpuRepulsion::new() else {
+            eprintln!("skipping GPU test: no working compute adapter");
+            return;
+        };
+        let mut forces = vec![[0.0; 2]; positions.len()];
+        gpu.evaluate(&tree.nodes, &tree.ordered, &positions, THETA, &mut forces)
+            .unwrap();
+        for target in 0..positions.len() {
+            let cpu = tree.repulsion(target, &positions, THETA);
+            for axis in 0..2 {
+                let tolerance = 0.002 * cpu[axis].abs().max(1.0);
+                assert!(
+                    (forces[target][axis] - cpu[axis]).abs() <= tolerance,
+                    "target={target} axis={axis} gpu={} cpu={}",
+                    forces[target][axis],
+                    cpu[axis]
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_backend_solves_small_connected_graph() {
+        let count = 256;
+        let from: Vec<u32> = (0..count - 1).collect();
+        let to: Vec<u32> = (1..count).collect();
+        let lengths = vec![100.0; from.len()];
+        let initial = vec![[0.0; 2]; count as usize];
+        let mut output = initial.clone();
+        let Ok(gpu) = crate::gpu_layout::GpuRepulsion::new() else {
+            eprintln!("skipping GPU test: no working compute adapter");
+            return;
+        };
+        initial_layout_cancellable_with_gpu(
+            count as usize,
+            &from,
+            &to,
+            &lengths,
+            &initial,
+            &mut output,
+            &AtomicBool::new(false),
+            Some(&gpu),
+        )
+        .unwrap();
+        assert!(
+            output
+                .iter()
+                .flatten()
+                .all(|coordinate| coordinate.is_finite())
+        );
+        assert!(output[0] != output[count as usize - 1]);
     }
 }

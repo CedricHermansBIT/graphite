@@ -4,6 +4,7 @@ mod app;
 mod export;
 mod filter;
 mod gfa;
+mod gpu_layout;
 mod graph;
 mod history;
 mod layout;
@@ -37,7 +38,7 @@ struct Args {
     #[argh(option)]
     benchmark_output: Option<String>,
 
-    /// initial layout backend: rust, or bandage when built with --features ogdf
+    /// initial layout backend: rust, gpu (with --features gpu), or bandage (with --features ogdf)
     #[argh(option, default = "String::from(\"rust\")")]
     layout_backend: String,
 
@@ -67,11 +68,24 @@ fn parse_layout_backend(value: &str) -> Result<layout::LayoutBackend> {
         );
     }
 
-    #[cfg(feature = "ogdf")]
-    anyhow::bail!("unknown layout backend '{value}'; expected 'rust' or 'bandage'");
+    #[cfg(not(feature = "gpu"))]
+    if value.eq_ignore_ascii_case("gpu") {
+        anyhow::bail!(
+            "layout backend 'gpu' is not included in this build; rebuild with `cargo build --release --features gpu`"
+        );
+    }
 
-    #[cfg(not(feature = "ogdf"))]
-    anyhow::bail!("unknown layout backend '{value}'; expected 'rust'");
+    let available = [
+        "rust",
+        #[cfg(feature = "gpu")]
+        "gpu",
+        #[cfg(feature = "ogdf")]
+        "bandage",
+    ];
+    anyhow::bail!(
+        "unknown layout backend '{value}'; expected {}",
+        available.join(", ")
+    );
 }
 
 fn run_benchmark(
@@ -94,7 +108,11 @@ fn run_benchmark(
     let view_graph_ms = milliseconds(start);
 
     let start = Instant::now();
-    let mut layout = layout::Layout::new_with_graph_backend(&view, backend);
+    let mut layout = layout::Layout::try_new_with_graph_backend(
+        &view,
+        backend,
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
     let initial_layout_ms = milliseconds(start);
     let initial_layout_converged = layout.converged;
 

@@ -103,6 +103,25 @@ The resulting binary supports both selectors:
 
 Requesting `--layout-backend bandage` from a Rust-only build prints an error explaining that Graphite must be rebuilt with `--features ogdf`.
 
+### Experimental GPU layout
+
+On the `experiment/gpu-layout` branch, build with `--features gpu` and select
+`--layout-backend gpu` to run Barnes–Hut repulsion through a `wgpu` compute
+shader. The backend uses Vulkan on Linux, Metal on macOS, or Direct3D 12 on
+Windows, subject to a working compute-capable adapter and driver. It does not
+require an NVIDIA GPU or CUDA.
+
+```bash
+cargo build --release --features gpu
+./target/release/graphite --layout-backend gpu path/to/assembly.gfa
+```
+
+This is a correctness prototype. Tree construction, attraction, and integration
+still run on the CPU; each repulsion pass uploads the tree and positions, then
+reads forces back. A speedup is not established. On the development H100 host,
+the NVIDIA Vulkan driver currently fails during device creation. Small shader
+and layout tests passed using the software Vulkan driver (`llvmpipe`).
+
 For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and repaint traffic:
 
 ```bash

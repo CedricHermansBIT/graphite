@@ -1596,6 +1596,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "argh",
+ "bytemuck",
  "cc",
  "csv",
  "eframe",
@@ -1605,6 +1606,7 @@ dependencies = [
  "image",
  "log",
  "memmap2",
+ "pollster 0.4.0",
  "rayon",
  "rfd",
  "same-file",
@@ -1612,6 +1614,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "wgpu",
 ]
 
 [[package]]

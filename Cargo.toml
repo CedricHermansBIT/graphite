@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 # Optional Bandage/OGDF reference backend. Enabling this feature requires the
 # Bandage submodule and a C++14 compiler; the default Rust-only build does not.
 ogdf = ["dep:cc"]
@@ -37,6 +38,9 @@ csv = "1"
 ab_glyph = "0.2"
 sha2 = "0.10"
 same-file = "1"
+wgpu = { version = "30.0.1", optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
 
 [profile.release]
 opt-level = 3
