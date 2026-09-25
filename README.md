@@ -122,6 +122,20 @@ reads forces back. A speedup is not established. On the development H100 host,
 the NVIDIA Vulkan driver currently fails during device creation. Small shader
 and layout tests passed using the software Vulkan driver (`llvmpipe`).
 
+On that host, the same Vulkan failure also prevents eframe's default UI
+renderer from starting, even with `--layout-backend rust`. To launch the UI
+using Mesa's software Vulkan driver, run:
+
+```bash
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  ./target/release/graphite --layout-backend rust path/to/assembly.gfa
+```
+
+This runs the UI on the CPU and does not accelerate layout on the H100. The
+experimental `gpu` backend can be substituted for `rust` to test correctness
+through `llvmpipe`; H100 acceleration would need a working Vulkan device or a
+separate CUDA compute backend.
+
 For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and repaint traffic:
 
 ```bash
