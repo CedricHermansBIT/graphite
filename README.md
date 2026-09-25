@@ -117,12 +117,17 @@ cargo build --release --features gpu
 ./target/release/graphite --layout-backend gpu path/to/assembly.gfa
 ```
 
-For NVIDIA CUDA devices, build with `--features cuda` instead.
+For NVIDIA CUDA devices, build with `--features cuda` instead. CUDA kernels are
+compiled at startup with NVRTC. The NVRTC toolkit must be compatible with the
+installed driver; if the system default is newer, put a compatible toolkit's
+library directory first in `LD_LIBRARY_PATH`. Graphite logs the CUDA error and
+tries the portable GPU backend when CUDA initialization fails.
 
 This is a correctness prototype. Tree construction, attraction, and integration
 still run on the CPU; each repulsion pass uploads the tree and positions, then
-reads forces back. A speedup is not established. Software Vulkan adapters are
-rejected unless `GRAPHITE_ALLOW_SOFTWARE_GPU=1` is set for testing.
+reads forces back. Performance depends on the dataset and device. Software
+Vulkan adapters are rejected unless `GRAPHITE_ALLOW_SOFTWARE_GPU=1` is set for
+testing.
 
 For SSH/X11 forwarding, `--remote-ui` reduces continuous layout snapshot and repaint traffic:
 

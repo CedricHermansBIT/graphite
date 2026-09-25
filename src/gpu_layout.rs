@@ -56,7 +56,10 @@ mod enabled {
             #[cfg(feature = "cuda")]
             let cuda_error = match crate::cuda_layout::CudaRepulsion::new() {
                 Ok(cuda) => return Ok(Self::Cuda(cuda)),
-                Err(error) => error,
+                Err(error) => {
+                    log::warn!("CUDA layout unavailable: {error:#}; trying portable GPU backend");
+                    error
+                }
             };
             #[cfg(feature = "cuda")]
             {
