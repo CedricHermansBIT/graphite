@@ -8,7 +8,6 @@
 //!  - Store path/walk steps in flat arrays rather than one allocation per record.
 
 use std::{
-    collections::HashMap,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     ops::Range,
@@ -19,6 +18,7 @@ use std::{
     },
 };
 
+use ahash::AHashMap;
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
 use memmap2::Mmap;
@@ -249,7 +249,7 @@ pub struct GfaGraph {
     pub tags: Vec<Tag>,
     /// Name -> segment index lookup.
     #[allow(dead_code)]
-    pub name_index: HashMap<Arc<str>, usize>,
+    pub name_index: AHashMap<Arc<str>, usize>,
 }
 
 #[allow(dead_code)]
@@ -492,7 +492,7 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
     let mut walks_raw = Vec::new();
     let mut raw_walk_steps = Vec::new();
     let mut tags = Vec::new();
-    let mut name_index: HashMap<Arc<str>, usize> = HashMap::new();
+    let mut name_index: AHashMap<Arc<str>, usize> = AHashMap::new();
     let mut diagnostics = Vec::new();
 
     let mut pos = 0usize;
@@ -501,11 +501,16 @@ fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGr
         check_cancelled(cancel)?;
         line_number += 1;
         let line_start = pos;
-        while pos < bytes.len() && bytes[pos] != b'\n' {
-            pos += 1;
-            if pos & 0xffff == 0 {
-                check_cancelled(cancel)?;
+        // Bound each SIMD search so cancellation still responds on very long
+        // path or sequence records.
+        while pos < bytes.len() {
+            let end = (pos + 64 * 1024).min(bytes.len());
+            if let Some(offset) = memchr::memchr(b'\n', &bytes[pos..end]) {
+                pos += offset;
+                break;
             }
+            pos = end;
+            check_cancelled(cancel)?;
         }
         let mut line_end = pos;
         if line_end > line_start && bytes[line_end - 1] == b'\r' {
@@ -1435,7 +1440,7 @@ fn parse_walk_step_field(
 fn resolve_name(
     mmap: &[u8],
     name_range: &Range<usize>,
-    name_index: &HashMap<Arc<str>, usize>,
+    name_index: &AHashMap<Arc<str>, usize>,
 ) -> Option<usize> {
     let name = std::str::from_utf8(&mmap[name_range.clone()]).ok()?;
     name_index.get(name).copied()

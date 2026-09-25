@@ -1616,6 +1616,7 @@ dependencies = [
  "flate2",
  "image",
  "log",
+ "memchr",
  "memmap2",
  "pollster 0.4.0",
  "rayon",
