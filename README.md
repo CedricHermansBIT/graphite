@@ -368,6 +368,9 @@ large GFA files.
 GitHub Pages. The expected project URL is
 <https://cedrichermansbit.github.io/graphite/>.
 
+Enable Pages once in **Settings → Pages → Build and deployment → Source → GitHub
+Actions**. After that, pushes to the `wasm` branch deploy automatically.
+
 GitHub Pages does not expose custom per-response COOP/COEP headers. Graphite therefore
 ships a small same-origin service worker that injects the headers before the threaded
 WebAssembly app starts. The first visit reloads once; after that
