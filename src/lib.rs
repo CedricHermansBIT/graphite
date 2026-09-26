@@ -1,11 +1,11 @@
+//! Shared browser entry point. The desktop binary keeps its existing startup path.
+
 #[cfg(all(target_arch = "wasm32", feature = "ogdf"))]
 compile_error!("The OGDF backend is native-only and cannot be enabled for the browser build.");
 #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
 compile_error!("The optional Graphite GPU layout backend is not enabled for the browser build.");
 #[cfg(all(target_arch = "wasm32", feature = "cuda"))]
 compile_error!("CUDA is native-only and cannot be enabled for the browser build.");
-
-//! Shared browser entry point. The desktop binary keeps its existing startup path.
 #[cfg(target_arch = "wasm32")]
 mod export;
 #[cfg(target_arch = "wasm32")]
