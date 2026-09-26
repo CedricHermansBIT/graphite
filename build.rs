@@ -82,9 +82,8 @@ fn build_ogdf() {
 
     // The package now also has a cdylib/rlib target for the browser. Keep the
     // native wrapper linked into the desktop binary explicitly as well.
-    let out_dir = std::path::PathBuf::from(
-        std::env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"),
-    );
+    let out_dir =
+        std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"));
     if target_env == "msvc" {
         println!(
             "cargo:rustc-link-arg-bin=graphite={}",
