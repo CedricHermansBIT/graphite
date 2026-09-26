@@ -27,8 +27,6 @@ jobs:
       - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
       - run: ./scripts/build-web.sh
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
