@@ -16,8 +16,32 @@
   <div id="error" role="alert"></div>
   <script type="module">
     import init, { initThreadPool, WebHandle } from './pkg/graphite.js';
+
+    async function ensureCrossOriginIsolation() {
+      const reloadKey = 'graphite-coi-reload';
+      if (crossOriginIsolated) {
+        sessionStorage.removeItem(reloadKey);
+        return;
+      }
+      if (!('serviceWorker' in navigator)) {
+        throw new Error('This browser cannot enable the cross-origin isolation required for WebAssembly threads.');
+      }
+
+      await navigator.serviceWorker.register('./coi-serviceworker.js');
+      await navigator.serviceWorker.ready;
+
+      if (!crossOriginIsolated) {
+        if (sessionStorage.getItem(reloadKey) === '1') {
+          throw new Error('Cross-origin isolation could not be enabled on this host.');
+        }
+        sessionStorage.setItem(reloadKey, '1');
+        location.reload();
+        await new Promise(() => {});
+      }
+    }
+
     try {
-      if (!crossOriginIsolated) throw new Error('Graphite Web needs cross-origin isolation (COOP and COEP headers).');
+      await ensureCrossOriginIsolation();
       await init();
       await initThreadPool(Math.min(navigator.hardwareConcurrency || 4, 8));
       const app = new WebHandle();
