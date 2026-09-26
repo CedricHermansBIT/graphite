@@ -35,6 +35,8 @@ const GRAPH_EDGE_RATIO: f32 = 5.0 / BANDAGE_NODE_SEGMENT_LENGTH;
 
 /// Maximum physics nodes per GFA segment (caps very long contigs).
 const MAX_PTS: usize = 64;
+#[cfg(target_arch = "wasm32")]
+const MAX_WEB_PHYSICS_POINTS: usize = 3_000_000;
 
 /// Stiffness for internal (within-segment) adjacent springs.
 const SPRING_INTERNAL: f32 = 0.55;
@@ -904,6 +906,11 @@ impl Layout {
             node_pts_start[v] = total_pts;
             total_pts += node_pts_count[v];
         }
+        #[cfg(target_arch = "wasm32")]
+        anyhow::ensure!(
+            total_pts <= MAX_WEB_PHYSICS_POINTS,
+            "This graph needs {total_pts} layout points, above the browser limit of {MAX_WEB_PHYSICS_POINTS}; use desktop Graphite"
+        );
         let mut positions = vec![[0.0; 2]; total_pts];
         // Allocate traversal state once, not once per component.
         let mut depth = vec![usize::MAX; n];
