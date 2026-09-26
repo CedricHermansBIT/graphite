@@ -267,6 +267,7 @@ pub fn export_svg_with_options(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 fn export_svg_impl(
     path: &Path,
@@ -490,6 +491,7 @@ pub fn export_png_with_options(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 fn export_png_impl(
     path: &Path,
