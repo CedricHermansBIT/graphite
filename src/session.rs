@@ -127,11 +127,20 @@ impl Session {
         Ok(session)
     }
 
-    pub fn validate_graph(&self, gfa: &GfaGraph, view: &ViewGraph, layout: &Layout) -> Result<()> {
+    pub fn validate_source(&self, gfa: &GfaGraph) -> Result<()> {
         ensure!(
             self.source_sha256 == fingerprint(gfa),
             "The source GFA has changed since this session was saved"
         );
+        Ok(())
+    }
+
+    pub fn validate_graph_state(
+        &self,
+        gfa: &GfaGraph,
+        view: &ViewGraph,
+        layout: &Layout,
+    ) -> Result<()> {
         ensure!(
             self.node_names.len() == view.nodes.len()
                 && self
@@ -156,6 +165,11 @@ impl Session {
             "Invalid session overlay selection"
         );
         Ok(())
+    }
+
+    pub fn validate_graph(&self, gfa: &GfaGraph, view: &ViewGraph, layout: &Layout) -> Result<()> {
+        self.validate_source(gfa)?;
+        self.validate_graph_state(gfa, view, layout)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
