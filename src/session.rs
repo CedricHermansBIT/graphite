@@ -93,7 +93,10 @@ impl Session {
             self.selection.iter().all(|&n| n < self.node_names.len()),
             "Invalid session selection"
         );
-        ensure!(valid_display(&self.display), "Invalid session display settings");
+        ensure!(
+            valid_display(&self.display),
+            "Invalid session display settings"
+        );
         ensure!(
             self.filter
                 .min_depth
