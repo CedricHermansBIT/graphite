@@ -82,6 +82,55 @@ pub fn export_csv(
     })
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn generate_fasta(gfa: &GfaGraph, graph: &ViewGraph, selection: &Selection) -> Vec<u8> {
+    let mut nodes: Vec<_> = selection.nodes.iter().copied().collect();
+    nodes.sort_unstable();
+    let mut output = Vec::new();
+    for ni in nodes {
+        let Some(node) = graph.nodes.get(ni) else {
+            continue;
+        };
+        let seg = &gfa.segments[node.seg_idx];
+        let seq = seg.sequence(&gfa.mmap);
+        if seq.is_empty() {
+            continue;
+        }
+        writeln!(output, ">{} len={}", node.name, node.length).unwrap();
+        for chunk in seq.chunks(80) {
+            output.extend_from_slice(chunk);
+            output.push(b'\n');
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn generate_csv(gfa: &GfaGraph, graph: &ViewGraph, selection: &Selection) -> Result<Vec<u8>> {
+    let mut indices: Vec<_> = if selection.is_empty() {
+        (0..graph.nodes.len()).collect()
+    } else {
+        selection.nodes.iter().copied().collect()
+    };
+    indices.sort_unstable();
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record(["name", "length", "depth", "read_count"])?;
+    for ni in indices {
+        let Some(node) = graph.nodes.get(ni) else {
+            continue;
+        };
+        let seg = &gfa.segments[node.seg_idx];
+        writer.write_record([
+            node.name.to_string(),
+            node.length.to_string(),
+            seg.depth.map_or_else(String::new, |d| format!("{d:.2}")),
+            seg.read_count.map_or_else(String::new, |n| n.to_string()),
+        ])?;
+    }
+    writer.flush()?;
+    Ok(writer.into_inner()?)
+}
+
 /// Copy all selected embedded sequences as FASTA records to the clipboard.
 pub fn copy_sequence_to_clipboard(
     gfa: &GfaGraph,
@@ -227,6 +276,58 @@ fn export_svg_impl(
     show_containments: bool,
     options: &FigureOptions,
 ) -> Result<()> {
+    let output = render_svg_impl(
+        gfa,
+        graph,
+        layout,
+        params,
+        selected_path,
+        selected_walk,
+        show_containments,
+        options,
+    )?;
+    atomic_write(path, |file| {
+        file.write_all(output.as_bytes())?;
+        Ok(())
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+pub fn generate_svg_with_options(
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+    options: &FigureOptions,
+) -> Result<Vec<u8>> {
+    Ok(render_svg_impl(
+        Some(gfa),
+        graph,
+        layout,
+        params,
+        selected_path,
+        selected_walk,
+        show_containments,
+        options,
+    )?
+    .into_bytes())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_svg_impl(
+    gfa: Option<&GfaGraph>,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+    options: &FigureOptions,
+) -> Result<String> {
     let figure = FigureTransform::new(layout, options)?;
     let mut output = String::new();
     output.push_str(&format!(
@@ -332,10 +433,7 @@ fn export_svg_impl(
         }
     }
     output.push_str("</g>\n</svg>\n");
-    atomic_write(path, |file| {
-        file.write_all(output.as_bytes())?;
-        Ok(())
-    })
+    Ok(output)
 }
 
 /// Export the current graph view as a PNG figure.
@@ -399,6 +497,62 @@ fn export_png_impl(
     show_containments: bool,
     options: &FigureOptions,
 ) -> Result<()> {
+    let image = render_png_impl(
+        gfa,
+        graph,
+        layout,
+        params,
+        selected_path,
+        selected_walk,
+        show_containments,
+        options,
+    )?;
+    atomic_write(path, |file| {
+        let mut writer = BufWriter::new(file);
+        image.write_to(&mut writer, image::ImageFormat::Png)?;
+        writer.flush()?;
+        Ok(())
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+pub fn generate_png_with_options(
+    gfa: &GfaGraph,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+    options: &FigureOptions,
+) -> Result<Vec<u8>> {
+    let image = render_png_impl(
+        Some(gfa),
+        graph,
+        layout,
+        params,
+        selected_path,
+        selected_walk,
+        show_containments,
+        options,
+    )?;
+    let mut output = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut output, image::ImageFormat::Png)?;
+    Ok(output.into_inner())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_png_impl(
+    gfa: Option<&GfaGraph>,
+    graph: &ViewGraph,
+    layout: &Layout,
+    params: &RenderParams,
+    selected_path: Option<usize>,
+    selected_walk: Option<usize>,
+    show_containments: bool,
+    options: &FigureOptions,
+) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     let figure = FigureTransform::new(layout, options)?;
     let mut image = ImageBuffer::from_pixel(
         figure.width as u32,
@@ -522,12 +676,7 @@ fn export_png_impl(
         }
     }
 
-    atomic_write(path, |file| {
-        let mut writer = BufWriter::new(file);
-        image.write_to(&mut writer, image::ImageFormat::Png)?;
-        writer.flush()?;
-        Ok(())
-    })
+    Ok(image)
 }
 
 #[allow(clippy::too_many_arguments)]

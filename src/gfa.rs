@@ -8,10 +8,8 @@
 //!  - Store path/walk steps in flat arrays rather than one allocation per record.
 
 use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::Read,
     ops::Range,
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -21,7 +19,41 @@ use std::{
 use ahash::AHashMap;
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
+use std::ops::Deref;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    fs::File,
+    io::{Seek, SeekFrom, Write},
+    path::Path,
+};
+
+/// Backing bytes for range-based GFA records. Native files remain memory mapped.
+pub enum InputBytes {
+    #[cfg(not(target_arch = "wasm32"))]
+    Mmap(Mmap),
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Owned(Vec<u8>),
+}
+
+impl Deref for InputBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Mmap(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<Mmap> for InputBytes {
+    fn from(value: Mmap) -> Self {
+        Self::Mmap(value)
+    }
+}
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -228,7 +260,7 @@ pub struct ParseDiagnostic {
 /// The parsed GFA graph.
 pub struct GfaGraph {
     /// Memory-mapped file kept alive as long as the graph lives.
-    pub mmap: Mmap,
+    pub mmap: InputBytes,
     pub version: GfaVersion,
     pub diagnostics: Vec<ParseDiagnostic>,
     #[allow(dead_code)]
@@ -390,12 +422,14 @@ struct RawWalk {
 
 // ── Parser ───────────────────────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_gfa<P: AsRef<Path>>(path: P) -> Result<GfaGraph> {
     parse_gfa_with_control(path, &AtomicBool::new(false))
 }
 
 /// Plain inputs stay memory-mapped. Gzip inputs are inflated into an anonymous
 /// temporary file, keeping decompressed bytes out of the process heap.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_gfa_with_control<P: AsRef<Path>>(path: P, cancel: &AtomicBool) -> Result<GfaGraph> {
     check_cancelled(cancel)?;
     let mut file = File::open(&path).with_context(|| format!("Cannot open {:?}", path.as_ref()))?;
@@ -407,9 +441,67 @@ pub fn parse_gfa_with_control<P: AsRef<Path>>(path: P, cancel: &AtomicBool) -> R
     }
     anyhow::ensure!(file.metadata()?.len() > 0, "GFA input is empty");
     let mmap = unsafe { Mmap::map(&file) }.context("Cannot memory-map GFA input")?;
-    parse_gfa_bytes_with_control(mmap, cancel)
+    parse_gfa_bytes_with_control(mmap.into(), cancel)
 }
 
+/// Browser input budget leaves room for graph structures and layout in shared Wasm memory.
+#[cfg(target_arch = "wasm32")]
+pub const MAX_WEB_GFA_BYTES: usize = 256 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+const MAX_WEB_SEGMENTS: usize = 500_000;
+#[cfg(target_arch = "wasm32")]
+const MAX_WEB_CONNECTIONS: usize = 1_000_000;
+
+/// Parse browser-owned bytes; gzip is decoded in bounded chunks before parsing.
+#[cfg(target_arch = "wasm32")]
+pub fn parse_gfa_owned(mut bytes: Vec<u8>) -> Result<GfaGraph> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_WEB_GFA_BYTES,
+        "GFA exceeds the browser 256 MiB input limit; open it in desktop Graphite"
+    );
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = MultiGzDecoder::new(bytes.as_slice());
+        let mut decoded = Vec::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = decoder
+                .read(&mut buffer)
+                .context("Cannot decompress gzip GFA input")?;
+            if count == 0 {
+                break;
+            }
+            anyhow::ensure!(
+                decoded.len() <= MAX_WEB_GFA_BYTES - count,
+                "Decompressed GFA exceeds the browser 256 MiB limit; open it in desktop Graphite"
+            );
+            decoded
+                .try_reserve(count)
+                .context("Browser memory is full while decompressing GFA")?;
+            decoded.extend_from_slice(&buffer[..count]);
+        }
+        bytes = decoded;
+    }
+    anyhow::ensure!(!bytes.is_empty(), "GFA input is empty");
+    let mut segments = 0usize;
+    let mut connections = 0usize;
+    for line in bytes.split(|&byte| byte == b'\n') {
+        if line.get(1) != Some(&b'\t') {
+            continue;
+        }
+        match line[0] {
+            b'S' => segments += 1,
+            b'L' | b'J' | b'C' => connections += 1,
+            _ => {}
+        }
+        anyhow::ensure!(
+            segments <= MAX_WEB_SEGMENTS && connections <= MAX_WEB_CONNECTIONS,
+            "GFA has too many records for the browser (limit: 500,000 segments and 1,000,000 connections); open it in desktop Graphite"
+        );
+    }
+    parse_gfa_bytes_with_control(InputBytes::Owned(bytes), &AtomicBool::new(false))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_DIAGNOSTICS: usize = 1000;
 
@@ -418,6 +510,7 @@ fn check_cancelled(cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn decompress_gzip<R: Read>(file: R, cancel: &AtomicBool, limit: u64) -> Result<File> {
     check_cancelled(cancel)?;
     let mut decoder = MultiGzDecoder::new(file);
@@ -468,10 +561,10 @@ fn warn(diagnostics: &mut Vec<ParseDiagnostic>, line: usize, message: impl Into<
 
 #[cfg(test)]
 fn parse_gfa_bytes(mmap: Mmap) -> Result<GfaGraph> {
-    parse_gfa_bytes_with_control(mmap, &AtomicBool::new(false))
+    parse_gfa_bytes_with_control(mmap.into(), &AtomicBool::new(false))
 }
 
-fn parse_gfa_bytes_with_control(mmap: Mmap, cancel: &AtomicBool) -> Result<GfaGraph> {
+fn parse_gfa_bytes_with_control(mmap: InputBytes, cancel: &AtomicBool) -> Result<GfaGraph> {
     check_cancelled(cancel)?;
     let bytes = &mmap[..];
     let version = detect_gfa_version(bytes, cancel)?;
@@ -1803,7 +1896,7 @@ mod tests {
     #[test]
     fn cancellation_stops_parsing_and_decompression() {
         let cancelled = AtomicBool::new(true);
-        let error = parse_gfa_bytes_with_control(mmap_from(b"S\ta\tA\n"), &cancelled)
+        let error = parse_gfa_bytes_with_control(mmap_from(b"S\ta\tA\n").into(), &cancelled)
             .err()
             .unwrap();
         assert!(error.to_string().contains("cancelled"));
@@ -1831,6 +1924,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn owned_input_preserves_the_same_ranges_as_mmap() {
+        let bytes = b"S\ta\tACGT\tDP:f:4\nS\tb\tTT\nL\ta\t+\tb\t+\t0M\n";
+        let mapped = parse(bytes);
+        let owned = parse_gfa_bytes_with_control(
+            InputBytes::Owned(bytes.to_vec()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(owned.segments.len(), mapped.segments.len());
+        assert_eq!(owned.links.len(), mapped.links.len());
+        assert_eq!(
+            owned.segment_sequence(&owned.segments[0]),
+            mapped.segment_sequence(&mapped.segments[0])
+        );
+        assert_eq!(owned.segments[0].depth, mapped.segments[0].depth);
     }
 
     #[test]

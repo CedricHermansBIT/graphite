@@ -1,10 +1,15 @@
 //! Versioned, explicit sessions. Preferences contain no sequence data.
 
-use anyhow::{Context, Result, ensure};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{BufReader, Write};
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::filter::FilterParams;
 use crate::gfa::GfaGraph;
@@ -27,7 +32,7 @@ impl Preferences {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
     pub format_version: u32,
     pub source: PathBuf,
@@ -49,6 +54,7 @@ pub fn fingerprint(gfa: &GfaGraph) -> String {
 }
 
 impl Session {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path).context("Cannot open session")?;
         ensure!(
@@ -150,6 +156,7 @@ impl Session {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn write(&self, path: &Path) -> Result<()> {
         ensure_distinct_output(path, &self.source)?;
         let parent = path
@@ -179,6 +186,7 @@ pub fn valid_display(display: &DisplayOptions) -> bool {
 }
 
 /// Never truncate the memory-mapped input, even through a symlink or hard link.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn ensure_distinct_output(output: &Path, input: &Path) -> Result<()> {
     if output.exists() {
         ensure!(

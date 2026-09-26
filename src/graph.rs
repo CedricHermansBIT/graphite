@@ -547,7 +547,11 @@ mod tests {
         use Strand::{Forward as F, Reverse as R};
         GfaGraph {
             diagnostics: Vec::new(),
-            mmap: MmapMut::map_anon(1).unwrap().make_read_only().unwrap(),
+            mmap: MmapMut::map_anon(1)
+                .unwrap()
+                .make_read_only()
+                .unwrap()
+                .into(),
             version: GfaVersion::Unspecified,
             headers: Vec::new(),
             segments,

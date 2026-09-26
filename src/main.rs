@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
@@ -16,6 +17,7 @@ mod selection;
 mod session;
 mod tasks;
 mod ui;
+mod visuals;
 
 use anyhow::{Context, Result};
 use argh::FromArgs;

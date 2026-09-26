@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graphite Web</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #14161c; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #error { position: absolute; top: 1rem; left: 1rem; color: #fff; background: #822; padding: .75rem; display: none; font: 14px sans-serif; }
+  </style>
+</head>
+<body>
+  <input id="gfa-file" type="file" accept=".gfa,.gfa1,.gfa2,.gz" hidden>
+  <canvas id="graphite"></canvas>
+  <div id="error" role="alert"></div>
+  <script type="module">
+    import init, { initThreadPool, WebHandle } from './pkg/graphite.js';
+    try {
+      if (!crossOriginIsolated) throw new Error('Graphite Web needs cross-origin isolation (COOP and COEP headers).');
+      await init();
+      await initThreadPool(Math.min(navigator.hardwareConcurrency || 4, 8));
+      const app = new WebHandle();
+      await app.start(document.getElementById('graphite'));
+      window.graphiteApp = app;
+    } catch (error) {
+      console.error(error);
+      const message = document.getElementById('error');
+      message.textContent = `Graphite could not start: ${error}`;
+      message.style.display = 'block';
+    }
+  </script>
+</body>
+</html>

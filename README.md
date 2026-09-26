@@ -328,3 +328,35 @@ assets/
   graphite-icon.png  application and README icon
   graphite-icon.ico  multi-resolution Windows icon
 ```
+
+## Browser build (experimental)
+
+The `wasm` branch contains a browser viewer sharing Graphite's GFA parser, view graph,
+renderer, Rust layout, native control panels, themes, minimap, and exporters. It opens
+local `.gfa`, `.gfa1`, and `.gz` files. It supports filtering, coloring, paths and walks,
+component browsing, statistics, selection, Pan/Select/Move modes, undo/redo, and SVG,
+PNG, FASTA, CSV, and session downloads. When opening a session, choose its source GFA
+file next so Graphite can verify its hash. Files stay in the browser; the browser build
+keeps input bytes in WebAssembly memory. Native Graphite continues to memory-map plain
+GFA files and decompressed gzip temporary files.
+
+The browser build uses `wasm-bindgen-rayon` Web Workers for Rayon operations. Install
+a recent Rust nightly with `rust-src` and the `wasm32-unknown-unknown` target, and
+`wasm-bindgen-cli` at the version used in `Cargo.lock` (currently 0.2.128). Then run:
+
+```sh
+./scripts/build-web.sh
+python3 scripts/serve-web.py
+```
+
+Open <http://localhost:8080>. The server sends `Cross-Origin-Opener-Policy: same-origin`
+and `Cross-Origin-Embedder-Policy: require-corp`; production hosting needs those same
+headers because the worker pool uses shared WebAssembly memory. The build script uses
+nightly Cargo with `-Z build-std=std,panic_abort`, and `.cargo/config.toml` enables
+WebAssembly atomics, bulk memory, and imported shared memory. The first browser
+build performs parsing and the initial layout on the UI thread, so large graphs
+can pause the page while opening.
+The browser refuses GFA inputs above 256 MiB, gzip streams that expand beyond
+256 MiB, graphs above 500,000 segments or 1,000,000 connections, and PNG exports
+above 16 million pixels. These limits keep failures visible before WebAssembly
+runs out of memory. The desktop app remains preferable for very large GFA files.
