@@ -1,0 +1,25 @@
+{
+  "timestamp_utc": "2026-09-25T14:54:32.125235+00:00",
+  "git_commit": "917f2fc64ad2c72503624785b5dda2912848f9f6",
+  "binary": "/srv/users/cedric/graphite/target/release/graphite",
+  "binary_sha256": "903304b07647e0d78e83e24f50975114d675b77b29e762ff74f48a3bc7969a96",
+  "platform": "Linux-6.8.0-142-generic-x86_64-with-glibc2.39",
+  "processor": "x86_64",
+  "frames_per_view": 60,
+  "process_warmups": 1,
+  "measured_repetitions": 5,
+  "rayon_threads": "8",
+  "datasets": [
+    {
+      "name": "branched-100k",
+      "path": "/srv/users/cedric/graphite/benchmarks/data/synthetic_branched_100000.gfa",
+      "sha256": "53412d4db3f09855ce791243fbb3339e158b25045f047d857de900a84b386189"
+    },
+    {
+      "name": "branched-1m",
+      "path": "/srv/users/cedric/graphite/benchmarks/data/synthetic_branched_1000000.gfa",
+      "sha256": "4d10f7ce5546f8bdcf9286d5c9322b52a14f4e6dae6471ca75b0a442b983a6f3"
+    }
+  ],
+  "measurement_scope": "CPU-side graph canvas construction plus egui tessellation"
+}

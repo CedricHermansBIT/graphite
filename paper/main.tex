@@ -1,0 +1,493 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{xspace}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,allcolors=blue]{hyperref}
+
+\newcommand{\graphite}{\textsc{Graphite}\xspace}
+\newcommand{\bandage}{\textsc{Bandage}\xspace}
+\newcommand{\bandageng}{\textsc{BandageNG}\xspace}
+\newcommand{\maybefigure}[2]{%
+  \IfFileExists{#1}{\includegraphics[#2]{#1}}%
+  {\fbox{\parbox[c][4.2cm][c]{0.92\linewidth}{\centering Missing figure\\\texttt{#1}}}}%
+}
+
+\title{\graphite: scalable interactive visualization of large genome assembly graphs}
+\author{Cedric Hermans\\
+Howest University of Applied Sciences, Belgium\\
+\href{https://orcid.org/0000-0002-9310-1876}{ORCID: 0000-0002-9310-1876}}
+\date{Preprint -- September 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Assembly graphs retain connectivity information that is lost when an assembly is considered only as a set of contigs, but whole-graph visualization becomes increasingly expensive as assembly and pangenome graphs grow. We present \graphite, an interactive GFA viewer available as a native desktop application and as a WebAssembly browser application. The two frontends share the same GFA parser, filtered graph model, Rust-native multilevel layout, rendering logic and interaction model. Native \graphite uses memory-mapped input, while the browser operates on local files held in WebAssembly memory. \graphite supports core GFA1 records together with GFA1.1 walks and GFA1.2 jumps, component filtering and ordering, path and walk overlays, direct graph manipulation, sessions, and SVG, PNG, FASTA and CSV export.
+
+In controlled synthetic benchmarks with one warm-up and five measured repetitions, the Rust layout backend processed one-million-segment chain, branched and fragmented graphs in 5.69, 13.29 and 7.02~s, respectively. The optional CUDA backend reduced the branched case to 10.12~s but was slower on chain and fragmented graphs. \bandageng exceeded the 900~s timeout on all three one-million-segment cases, while \bandage returned errors for all measured 500,000- and one-million-segment runs in the present benchmark environment. On an HPRC chromosome 22 graph, \graphite completed in 27.67~s with Rust layout and 18.39~s with CUDA, whereas both external viewers exceeded 900~s.
+\end{abstract}
+
+\section{Introduction}
+Assembly graphs expose repeats, ambiguous joins and alternative paths that are difficult to infer from contigs alone. \bandage established a widely used interactive workflow for assembly-graph visualization, combining graph layout with navigation, manual node movement, labels and sequence extraction \citep{wick2015bandage}. GfaViz and Assembly Graph Browser extended GFA visualization and large-graph exploration in different directions \citep{gonnella2019gfaviz,mikheenko2019agb}.
+
+These viewers address different tasks. GfaViz supports GFA2 elements and configurable styles, while Assembly Graph Browser uses a browser-based hierarchical view with repeat analysis and graph simplification \citep{gonnella2019gfaviz,mikheenko2019agb}. For pangenome graphs, ODGI provides scalable graph processing and overview visualizations, and PangyPlot combines reference-coordinate navigation with hierarchical bubbles and nucleotide-level exploration \citep{guarracino2022odgi,mastromatteo2026pangyplot}. \graphite instead emphasizes direct manipulation of whole GFA1 assembly graphs through closely matched native desktop and browser frontends. It does not offer GFA2 parsing, reference-coordinate navigation or bubble-hierarchy views; the tools are therefore complementary rather than interchangeable.
+
+The Graphical Fragment Assembly format is now a common interchange format for assembly and sequence graphs. GFA1 represents segments, links, paths and containments, while GFA1.1 and GFA1.2 add walks and jumps \citep{gfaspec}. As graphs grow, the practical bottleneck is no longer parsing alone, but also layout, memory use and maintaining responsive interaction.
+
+\graphite addresses this scaling problem while preserving direct graph manipulation. Its main contributions are a compact byte-level GFA parser with memory-mapped native input, a Rust-native multilevel layout, asynchronous graph preparation, level-of-detail rendering, shared desktop and browser interaction logic, broad GFA1.1/1.2 visualization support, and a reproducible benchmark harness for end-to-end comparison with \bandage and \bandageng.
+
+\section{Design and implementation}
+\subsection{Parsing and graph representation}
+\graphite is implemented in Rust. In the native application, plain GFA input is memory-mapped and gzip input is decompressed to a bounded temporary file before being memory-mapped. The browser reads local files into owned WebAssembly memory and runs the same byte-level parser; gzip input is decompressed into a bounded in-memory buffer. Offsets into the backing bytes are retained wherever possible so embedded sequence data are not eagerly copied. The parser uses vectorized newline search and a compact numeric index when all segment names are canonical, densely numbered decimal identifiers; other inputs use a general name hash table. Parsed records are projected into a filtered view graph containing only the nodes, connections and metadata required by the current display. Malformed records and unsupported producer conventions are reported with line-numbered diagnostics, and strict parsing can reject inputs with warnings.
+
+The parser supports \texttt{H}, \texttt{S}, \texttt{L}, \texttt{C} and \texttt{P} records, GFA1.1 \texttt{W} records and GFA1.2 \texttt{J} records. Optional fields are preserved in a generic tag representation. Genuine GFA2 input is detected and rejected rather than silently interpreted as GFA1 \citep{gfaspec}.
+
+\subsection{Layout}
+The default backend is a Rust-native multilevel force-directed layout inspired by fast multipole multilevel methods for large graphs \citep{hachul2007large}. Coarse layouts are propagated back to finer levels, and repulsive forces on sufficiently large levels are approximated using a Barnes-Hut spatial hierarchy \citep{barnes1986hierarchical}. Graphite sorts particles by Morton code, builds a compact quadtree with small particle buckets, and limits full-resolution postprocessing iterations on large graphs. Connected components can be solved independently and are packed afterwards; explicit circular components are placed as rings.
+
+An optional GPU backend evaluates Barnes-Hut repulsion on a compute device while tree construction, attraction and position integration remain on the CPU. Its portable implementation uses \texttt{wgpu} through Vulkan, Metal or Direct3D 12; NVIDIA devices can use an optional CUDA implementation. The GPU measurements in this paper use CUDA on an NVIDIA H100 PCIe. Because work crosses the host--device boundary each iteration, performance depends on graph size and topology.
+
+A bundled \bandage/OGDF layout backend is available through a small native bridge as an optional build feature. The default build is Rust-only and therefore does not require the Bandage source submodule or a C++ compiler. Enabling the \texttt{ogdf} Cargo feature adds this backend specifically as a validation and reference implementation. It serves primarily to verify the Rust-native layout against a well-established implementation and to provide an internal reference standard for benchmarking under the same parser, graph model and export pipeline. It is not required for normal use of \graphite. \bandage also uses OGDF's fast multipole multilevel layout \citep{wick2015bandage}.
+
+Graph preparation is separated from interactive event handling in both frontends. The native application performs loading and layout preparation on background threads and publishes layout snapshots asynchronously. The browser uses the shared-memory Rayon worker pool for parsing, statistics, filtered-view construction and initial layout. Saved sessions restore validated graph geometry without rerunning initial placement. Desktop refinement continues asynchronously, while the browser advances refinement in bounded work between interface frames.
+
+\subsection{Rendering and interaction}
+The interface is built with \texttt{egui}/\texttt{eframe}. Users can filter segments by name, length and coverage, filter and sort components, color by coverage, length or read count, inspect component summaries, overlay GFA paths and haplotype walks, visualize containments at their internal attachment positions, select regions, and directly move segments. A minimap supports navigation of large graphs. For settled layouts, cached geometry avoids repeated segment-bound calculations; at fitted large-graph overviews, subpixel groups use representative dots while long segments and selected nodes remain visible. Dense links use spatial representatives by screen cell and direction; selected links remain visible. Zooming in restores individual elements. Manual movements support bounded undo and redo; sessions preserve the source fingerprint, filters, view and geometry. SVG and PNG exports preserve active graph colors and overlays, with configurable dimensions and viewport cropping.
+
+\subsection{Browser deployment}
+The browser frontend is compiled to \texttt{wasm32-unknown-unknown} and uses \texttt{wasm-bindgen-rayon} workers with shared WebAssembly memory. It opens local GFA, gzip-compressed GFA and Graphite session files without uploading them to a server, and provides the same filtering, component browsing, overlays, selection, direct movement and export workflows as the native interface. The public build is deployed through GitHub Pages at \url{https://cedrichermansbit.github.io/graphite/}. Cross-origin isolation required by WebAssembly threads is established by a same-origin service worker on GitHub Pages.
+
+The browser build uses a maximum shared WebAssembly memory of 1~GiB and applies explicit preflight limits to avoid exhausting that address space. It rejects input files or decompressed gzip streams above 256~MiB, graphs above 500,000 segments or 1,000,000 connections, more than 2,000,000 total path/walk steps, layouts requiring more than 3,000,000 physics points, session files above 128~MiB, and PNG exports above 16 million pixels. These are browser-specific safeguards; the native application is the intended interface for larger inputs.
+
+\section{Benchmark design}
+\subsection{Datasets}
+Synthetic GFA1 graphs were generated deterministically at 10,000, 100,000, 500,000 and one million segments. The primary scaling topologies were chains, regularly branched graphs and fragmented collections of small components. Separate 10,000-segment feature cases exercise optional tags, jumps, paths, walks, containments and mixed GFA1.2 records.
+
+The public comparison corpus deliberately mixes several kinds of non-generated-by-Graphite input: published biological graphs, published simulated-community assembly graphs, assembler test data, and small format fixtures. This distinction is important because not every public GFA in the corpus represents an independently sequenced biological sample. The largest biological case in the present benchmark is an HPRC v1.1 chromosome 22 pangenome graph. Table~\ref{tab:dataset-characteristics} summarizes the graph sizes; Tables~\ref{tab:dataset-sources} and~\ref{tab:dataset-provenance} document their sources and accessions.
+
+\begin{table}[ht]
+\centering
+\caption{Characteristics of the real GFA datasets used in the publication benchmark, as inspected by the benchmark harness. ``Not declared'' means that no GFA version header was present in the file.}
+\label{tab:dataset-characteristics}
+\scriptsize
+\begin{tabular}{lrrrrl}
+\toprule
+Dataset & File (MiB) & Segments & Links & Paths & GFA version\\
+\midrule
+vg/cactus BRCA2 & 0.14 & 1,134 & 1,226 & 3 & 1.1\\
+SPAdes ESC & 8.02 & 982 & 1,318 & 190 & Not declared\\
+Flye 1Y3B & 22.09 & 69 & 10 & 0 & 1.0\\
+MEGAHIT 5G & 29.75 & 11,761 & 2,254 & 0 & Not declared\\
+myloasm & 0.003 & 3 & 2 & 0 & 1.0\\
+hifiasm chr11 2M & 2.18 & 1 & 0 & 0 & Not declared\\
+HPRC v1.1 chr22 & 628.10 & 1,279,333 & 1,780,739 & 512 & 1.0\\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{table}[ht]
+\centering
+\caption{Public provenance of the real benchmark datasets. Repository fixtures are pinned to the exact source revision used by the compatibility manifest. For the agtools assembler fixtures, the repository documents tested assembler versions, but the individual GFA files do not encode enough provenance to prove that those exact versions generated the committed fixture; these are therefore reported as tested/reference versions rather than generation versions.}
+\label{tab:dataset-sources}
+\scriptsize
+\begin{tabular}{p{2.6cm}p{7.1cm}p{4.3cm}}
+\toprule
+Dataset & Public source / accession & Generator or version information\\
+\midrule
+vg/cactus BRCA2 &
+\texttt{vgteam/vg}, commit \texttt{d08602f3\allowbreak{}855d5eb5\allowbreak{}ca406a38\allowbreak{}8b01d2cd\allowbreak{}12c002d5}, \path{test/graphs/cactus-BRCA2.gfa} &
+vg/Cactus test fixture; exact Cactus generation version is not recorded in the fixture provenance.\\
+\addlinespace
+SPAdes ESC &
+\texttt{Vini2/agtools}, commit \texttt{70fb018c\allowbreak{}a01c0110\allowbreak{}45c44f26\allowbreak{}a425bf38\allowbreak{}ab53eb13}, \path{tests/data/ESC/assembly_graph_with_scaffolds.gfa} &
+Exact generation version not recorded; agtools documents SPAdes 3.15.5 as its tested reference version.\\
+\addlinespace
+Flye 1Y3B &
+\texttt{Vini2/agtools}, same pinned commit, \path{tests/data/1Y3B/assembly_graph.gfa} &
+Exact generation version not recorded; agtools documents Flye 2.9.6-b1802 as its tested reference version.\\
+\addlinespace
+MEGAHIT 5G &
+\texttt{Vini2/agtools}, same pinned commit, \path{tests/data/5G/final.gfa} &
+The fixture is a GFA conversion of MEGAHIT FASTG output using agtools. Exact generation version is not recorded; agtools documents MEGAHIT 1.2.9 as its tested reference version.\\
+\addlinespace
+myloasm &
+\texttt{Vini2/agtools}, same pinned commit, \path{tests/data/myloasm/final_contig_graph.gfa}; read identifiers in the GFA include ENA run \texttt{ERR10750395}. &
+Exact generation version not encoded; agtools documents myloasm 0.1.0 as its tested reference version.\\
+\addlinespace
+hifiasm chr11 2M &
+Official hifiasm test input \texttt{chr11-2M.fa.gz}, distributed from the hifiasm GitHub release asset path \texttt{v0.7}; GFA generated locally for this benchmark. &
+hifiasm 0.25.0-r72, run with the small-test \texttt{-f0} setting; primary-contig GFA \texttt{*.bp.p\_ctg.gfa}.\\
+\addlinespace
+HPRC v1.1 chr22 &
+Zenodo record \texttt{19573105}, file \path{chr22.mc-grch38.sorted.gfa.gz}, MD5 \texttt{f4a8e7e3\allowbreak{}a8eb1095\allowbreak{}c375fc4a\allowbreak{}0eabd595}. &
+HPRC v1.1 minigraph-cactus clip graph with GRCh38 reference. The official HPRC v1.1 reproduction recipe specifies Cactus 2.6.4.\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the SPAdes, Flye, MEGAHIT and myloasm fixtures, the exact public file identity is reproducible through the commit-pinned agtools paths above. The assembler versions 3.15.5, 2.9.6-b1802, 1.2.9 and 0.1.0, respectively, are the versions explicitly documented by agtools as tested for those assembler-specific graph readers; they should not be interpreted as independently verified generation versions for the committed test files. The HPRC graph provenance is stronger: the archived chromosome-22 file is part of the HPRC v1.1 minigraph-cactus clip release, and the official v1.1 construction recipe specifies Cactus 2.6.4. The hifiasm graph was generated locally from the project's official chr11-2M test input with hifiasm 0.25.0-r72.
+
+\begin{table}[ht]
+\centering
+\caption{Provenance of the public GFA datasets used in the cross-tool comparison. Where a fixture does not record the exact generating binary version or biological accession, the value is reported as undocumented rather than inferred.}
+\label{tab:dataset-provenance}
+\scriptsize
+\begin{tabular}{p{2.0cm}p{5.0cm}p{3.0cm}p{3.4cm}}
+\toprule
+Dataset & Provenance & Accession / persistent source & Graph generator\\
+\midrule
+vg/cactus BRCA2 &
+Public \texttt{vg} test fixture \path{test/graphs/cactus-BRCA2.gfa}, pinned in the Graphite compatibility manifest to \texttt{vg} commit \texttt{d08602f3\allowbreak{}855d5eb5\allowbreak{}ca406a38\allowbreak{}8b01d2cd\allowbreak{}12c002d5}. &
+\texttt{vg} repository fixture; no sequencing accession documented. &
+Cactus-derived graph; the original Cactus version used to create this historical fixture is not documented in the accessible fixture history.\\
+\addlinespace
+SPAdes ESC &
+GraphBin ESC simulated metagenome, based on the three most abundant species and proportions from the Sharon infant-gut run SRR492184 \citep{graphbin2020}. The agtools and GraphBin copies have the same Git blob identifier. &
+Sharon source: SRA052203; composition basis: SRR492184. &
+metaSPAdes from SPAdes 3.13.0 \citep{graphbin2020}.\\
+\addlinespace
+Flye 1Y3B &
+GraphBin/MetaBCC-LR Zymo-1Y3B simulated long-read mock-community dataset. The agtools and GraphBin copies have the same Git blob identifier. &
+Simulated dataset; no independent SRA run accession is documented for the simulated 1Y3B read set. &
+metaFlye, available in Flye 2.4.2 \citep{metabcclr2020}.\\
+\addlinespace
+MEGAHIT 5G &
+agtools test fixture \path{tests/data/5G/final.gfa}; MEGAHIT FASTG converted to GFA using agtools' \texttt{fastg2gfa} workflow \citep{agtools2026}. &
+Underlying read accession is not documented in the public test fixture. &
+Exact generating MEGAHIT version is not encoded in the fixture. agtools documents/tests MEGAHIT 1.2.9, but this does not prove the historical fixture was generated with that binary.\\
+\addlinespace
+myloasm &
+agtools myloasm fixture derived from Microflora Danica data; read identifiers embedded in the GFA include \texttt{ERR10750395}. &
+Run ERR10750395; Microflora Danica BioProject PRJEB58634 \citep{sereika2025}. &
+The fixture does not embed a binary version. agtools documents/tests myloasm 0.1.0 \citep{agtools2026}.\\
+\addlinespace
+hifiasm chr11 2M &
+Official hifiasm chromosome-11 2-Mbp HiFi test dataset, assembled locally by the compatibility suite with \texttt{-f0}. &
+hifiasm GitHub release asset \texttt{v0.7/chr11-2M.fa.gz}. &
+hifiasm 0.25.0-r72, using the small-test \texttt{-f0} setting.\\
+\addlinespace
+HPRC v1.1 chr22 &
+HPRC v1.1 minigraph-cactus clip graph with GRCh38 reference, chromosome 22, repackaged for PangyPlot. &
+Zenodo DOI \href{https://doi.org/10.5281/zenodo.19573105}{10.5281/zenodo.19573105}; file \path{chr22.mc-grch38.sorted.gfa.gz}. &
+Cactus 2.6.4; the HPRC v1.1 reproduction instructions use the Cactus 2.6.4 binary release for the GRCh38 minigraph-cactus graph.\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ESC and 1Y3B lineage can be assigned more strongly than from filenames alone: the corresponding GFA files in the agtools and GraphBin test corpora have identical Git blob identifiers. For the MEGAHIT 5G and vg/BRCA2 fixtures, the public repositories identify the producing tool but do not retain enough metadata to reconstruct an exact original assembler version or raw-read accession. The hifiasm graph was generated locally from the official test-data release with hifiasm 0.25.0-r72 and the \texttt{-f0} small-test setting.
+
+\subsection{Protocol}
+The benchmark measures complete tool execution for the same operation: load a GFA file, compute the default layout and write an SVG. Primary metrics are end-to-end wall time and peak resident set size. Peak RSS measures host-process memory and does not include CUDA device memory. CPU time is calculated as GNU \texttt{/usr/bin/time} user time plus system time, and average CPU occupancy is reported as CPU time divided by wall time (in core-equivalents); CUDA device execution is not included in CPU time. \graphite additionally records parsing, view-graph construction, initial layout and export timings. CPU totals are available for completed runs and non-timeout failures. Because the timeout handler terminates the timed process group, GNU \texttt{time} did not emit final CPU totals for the 900~s timeout cases; these values are therefore left unreported rather than estimated.
+
+Publication mode runs tools serially. Each tool/dataset pair receives one warm-up followed by five measured runs. Results are reported as medians with interquartile ranges. Runs exceeding 900~s are retained as timeouts; crashes and non-zero exits are retained as errors rather than removed. \graphite and the standalone comparators were measured on the same machine with the same datasets, timeout and RSS-sampling protocol. Measurements were collected in separate serial benchmark sessions, so session-level variation remains possible.
+
+We separately measured CPU-side canvas work using the same graph drawing path as the desktop application. After loading and initial layout, a fixed 1280-by-720-pixel viewport was panned horizontally over 480 pixels at both fit-to-screen and 1:1 zoom; the detail view was centered on the middle segment. Each view had 10 warm-up frames and 60 timed frames; each graph had one process warm-up followed by five measured processes. Timings include egui shape construction and tessellation after building the settled-layout render cache. Cache construction is reported separately. The measurements exclude input delivery, other interface panels, the minimap, GPU rendering and display presentation, so they measure a canvas-work proxy rather than complete interaction latency. No comparator viewer was measured with this protocol.
+
+Benchmarks were run on Linux 6.8.0-142-generic (x86-64, glibc 2.39) on an Intel Xeon Silver 4310 CPU at 2.10~GHz with 48 logical CPUs and 251.3~GiB of system memory. The CUDA backend used an NVIDIA H100 PCIe with 80~GiB of device memory, driver 580.178.04 and CUDA 12.4 NVRTC. The benchmark harness used Python 3.12.3. Publication mode was serial (\texttt{jobs=1}), adaptive repetitions were disabled, and no contention warning was reported. The native parser, graph-construction, layout and export code paths measured by the benchmark are the implementations described in this manuscript.
+
+For the publication benchmarks, the optional CUDA and OGDF backends were enabled alongside the default Rust backend. All three \graphite backends were run with \texttt{RAYON\_NUM\_THREADS=8}; CUDA used the installed 12.4 runtime compiler library. No thread-related environment override was supplied to standalone \bandage or \bandageng. \bandageng was version 2026.9.1, and the standalone \bandage executable was the Ubuntu x86-64 v0.9.0 AppImage.
+
+No 8~GiB memory limit was configured by the benchmark harness: the machine exposed 251.3~GiB of RAM, and the standalone \bandage command and environment contained no memory-limit setting. Consequently, the observed \bandage errors are reported as failures without assigning a memory-exhaustion cause.
+
+\section{Results}
+\subsection{Synthetic scaling}
+At one million segments, the Rust backend completed all three controlled topologies in 5.69--13.29~s. CUDA took 6.41~s on the chain, 10.12~s on the branched graph and 7.68~s on the fragmented graph. The optional OGDF reference backend, used as an internal validation and comparison standard, required 5.65--90.59~s. \bandageng exceeded the 900~s timeout on all three one-million-segment cases, and \bandage returned errors for all measured 500,000- and one-million-segment cases (Table~\ref{tab:synthetic-million}). Figure~\ref{fig:synthetic-scaling} shows the full branched and fragmented scaling curves, with exact wall times in Table~\ref{tab:synthetic-wall}.
+
+\begin{table}[ht]
+\centering
+\caption{One-million-segment synthetic benchmark results. Values are medians across five measured runs. TO denotes timeout at 900~s; ERR denotes that all measured runs returned errors.}
+\label{tab:synthetic-million}
+\small
+\begin{tabular}{llrr}
+\toprule
+Topology & Tool & Time (s) & Peak RSS (GiB)\\
+\midrule
+Chain & \graphite{} Rust & 5.69 & 1.78\\
+      & \graphite{} CUDA & 6.41 & 1.83\\
+      & \graphite{} OGDF & 5.65 & 1.78\\
+      & \bandageng & TO & --\\
+      & \bandage & ERR & --\\
+\addlinespace
+Branched & \graphite{} Rust & 13.29 & 1.80\\
+         & \graphite{} CUDA & 10.12 & 1.84\\
+         & \graphite{} OGDF & 90.59 & 5.35\\
+         & \bandageng & TO & --\\
+         & \bandage & ERR & --\\
+\addlinespace
+Fragmented & \graphite{} Rust & 7.02 & 1.81\\
+           & \graphite{} CUDA & 7.68 & 1.85\\
+           & \graphite{} OGDF & 7.17 & 1.81\\
+           & \bandageng & TO & --\\
+           & \bandage & ERR & --\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On the 500,000-segment branched graph, \graphite Rust completed in 6.83~s with 0.94~GiB peak RSS, while CUDA took 5.61~s with 1.01~GiB; \bandageng took 451.62~s and 10.39~GiB. On the 100,000-segment branched graph, \graphite Rust required 1.38~s and 221~MiB, while CUDA required 1.58~s and 331~MiB. \bandageng required 70.10~s and 2.25~GiB and \bandage required 67.91~s and 1.72~GiB.
+
+For fragmented graphs, the one-million-segment Rust run completed in 7.02~s with 1.81~GiB peak RSS; CUDA took 7.68~s with 1.85~GiB. At 500,000 segments Rust completed in 3.41~s with 924~MiB, while \bandageng timed out and \bandage failed. The Graphite OGDF backend had nearly identical end-to-end times for the chain and fragmented cases, while Rust was 6.82 times faster than OGDF on the large branched graph.
+
+\begin{figure}[ht]
+\centering
+\maybefigure{figures/fig_wall_time_branched.pdf}{width=0.49\textwidth}\hfill
+\maybefigure{figures/fig_wall_time_fragmented.pdf}{width=0.49\textwidth}
+\caption{End-to-end wall-time scaling on synthetic branched and fragmented graphs. Points show medians and error bars show IQR across five measured runs. Open triangles at 900~s mark timeouts; error outcomes have no completion-time point.}
+\label{fig:synthetic-scaling}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Wall time (s) for every point in the synthetic scaling plots. Values are medians of five measured runs. TO indicates all runs reached the 900~s timeout; ERR indicates all runs failed.}
+\label{tab:synthetic-wall}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Dataset & Graphite Rust & Graphite CUDA & Graphite OGDF & BandageNG & Bandage\\
+\midrule
+Branched 10k & 0.510 & 0.867 & 2.447 & 5.387 & 6.353\\
+Branched 100k & 1.377 & 1.582 & 7.995 & 70.103 & 67.913\\
+Branched 500k & 6.83 & 5.61 & 42.30 & 451.62 & ERR\\
+Branched 1M & 13.29 & 10.12 & 90.59 & TO & ERR\\
+\addlinespace
+Fragmented 10k & 0.103 & 0.511 & 0.103 & 1.528 & 4.980\\
+Fragmented 100k & 0.612 & 1.122 & 0.664 & 19.160 & 46.682\\
+Fragmented 500k & 3.41 & 3.87 & 3.31 & TO & ERR\\
+Fragmented 1M & 7.02 & 7.68 & 7.17 & TO & ERR\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Real assembly graphs}
+On the SPAdes ESC graph, \graphite Rust completed in 0.205~s with 19.2~MiB peak RSS, compared with 1.12~s and 55.8~MiB for \bandageng and 1.78~s and 67.4~MiB for \bandage. On the MEGAHIT 5G graph, the corresponding values were 0.510~s and 56.4~MiB for \graphite Rust, 3.82~s and 360~MiB for \bandageng, and 6.15~s and 299~MiB for \bandage.
+
+The largest real graph produced the clearest separation. On HPRC chromosome 22, \graphite Rust completed in 27.67~s with 3.81~GiB peak RSS. CUDA completed in 18.39~s with 3.90~GiB, and the optional OGDF reference backend completed in 177.69~s with 10.00~GiB. Standalone \bandage and \bandageng both exceeded 900~s on all five measured runs. Figures~\ref{fig:real-wall} and~\ref{fig:real-rss} compare the real-graph wall times and peak memory; Tables~\ref{tab:real-wall} and~\ref{tab:real-rss} give the corresponding values.
+
+\begin{figure}[ht]
+\centering
+\maybefigure{figures/fig_real_assemblies_wall_time.pdf}{width=0.88\textwidth}
+\caption{End-to-end wall time on selected real assembly and pangenome graphs. Timeout markers at 900~s are right-censored limits, not measured completion times.}
+\label{fig:real-wall}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\maybefigure{figures/fig_real_assemblies_peak_rss.pdf}{width=0.88\textwidth}
+\caption{Peak RSS for successful runs on selected real assembly and pangenome graphs.}
+\label{fig:real-rss}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Wall time (s) for every dataset in the real-graph plot. Values are medians of five measured runs; TO indicates all runs reached the 900~s timeout.}
+\label{tab:real-wall}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Dataset & Graphite Rust & Graphite CUDA & Graphite OGDF & BandageNG & Bandage\\
+\midrule
+BRCA2 & 0.205 & 0.562 & 0.357 & 0.764 & 1.069\\
+SPAdes ESC & 0.205 & 0.613 & 0.662 & 1.120 & 1.781\\
+Flye & 0.103 & 0.511 & 0.103 & 0.510 & 0.764\\
+MEGAHIT 5G & 0.510 & 1.272 & 1.527 & 3.822 & 6.149\\
+myloasm & 0.052 & 0.459 & 0.052 & 0.204 & 0.255\\
+hifiasm chr11 & 0.052 & 0.459 & 0.052 & 0.255 & 0.357\\
+HPRC chr22 & 27.67 & 18.39 & 177.69 & TO & TO\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Peak RSS (MiB) for successful runs in the real-graph memory plot. Values are medians of five measured runs; TO marks runs with no completed memory measurement.}
+\label{tab:real-rss}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Dataset & Graphite Rust & Graphite CUDA & Graphite OGDF & BandageNG & Bandage\\
+\midrule
+BRCA2 & 11.3 & 162.1 & 18.1 & 53.4 & 41.8\\
+SPAdes ESC & 19.2 & 172.5 & 25.6 & 55.8 & 67.4\\
+Flye & 30.5 & 169.9 & 30.5 & 42.2 & 79.6\\
+MEGAHIT 5G & 56.4 & 205.6 & 70.2 & 360.2 & 299.0\\
+myloasm & 8.8 & 147.7 & 8.7 & 29.0 & 21.9\\
+hifiasm chr11 & 10.2 & 149.0 & 10.2 & 32.1 & 36.5\\
+HPRC chr22 & 3903 & 3990 & 10240 & TO & TO\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{CPU utilization and total CPU work}
+CPU accounting shows that the wall-time differences cannot be explained simply by Graphite consuming more cores. Table~\ref{tab:cpu} summarizes representative CPU utilization for CPU-only backends; CUDA device work is outside this accounting. On the 500,000-segment branched graph, \graphite Rust used a median 22.47 CPU-s over 6.83~s wall time, with 3.22 median average cores per run. The optional OGDF reference backend used 42.21 CPU-s over 42.30~s (approximately one core), while \bandageng used 451.47 CPU-s over 451.62~s (also approximately one core). Thus the Rust backend was 66.2-fold faster in wall time than \bandageng while consuming about 20-fold less total CPU time on this workload.
+
+The difference is even more pronounced for fragmented graphs, where \bandageng uses substantially more parallelism. On the 100,000-segment fragmented graph, \graphite Rust used 0.56 CPU-s over 0.612~s, or 0.93 median average cores per run, whereas \bandageng used 238.03 CPU-s over 19.16~s, or 12.43 average cores. \graphite completed 31.3-fold sooner while consuming much less total CPU time. On the MEGAHIT 5G graph, \graphite Rust used 1.62 CPU-s over 0.510~s (3.18 average cores), compared with 45.18 CPU-s over 3.82~s (12.12 average cores) for \bandageng.
+
+On HPRC chromosome 22, \graphite Rust consumed 100.93 CPU-s over 27.67~s, corresponding to 3.63 median average cores per run. The OGDF reference backend consumed 177.55 CPU-s over 177.69~s, or approximately one core. CPU totals are unavailable for the standalone \bandage and \bandageng HPRC runs because they reached the 900~s timeout.
+
+These results also separate the effects of parallelism from algorithmic work. On the one-million-segment branched graph, Rust used less than half the total CPU time of OGDF (43.72 versus 90.50 CPU-s), while parallel execution further reduced wall time from 90.59 to 13.29~s. On the one-million-segment fragmented graph, both backends used approximately 7.0 CPU-s and 7.0~s wall time, so the end-to-end comparison shows little backend difference for this topology.
+
+\begin{table}[ht]
+\centering
+\caption{Representative CPU utilization results. CPU time is user plus system time; average cores is calculated for each run as CPU time divided by wall time. Columns report medians across five measured successful runs.}
+\label{tab:cpu}
+\small
+\begin{tabular}{llrrr}
+\toprule
+Dataset & Tool & Wall (s) & CPU (s) & Avg. cores\\
+\midrule
+Branched 500k & \graphite{} Rust & 6.83 & 22.47 & 3.22\\
+               & \graphite{} OGDF & 42.30 & 42.21 & 1.00\\
+               & \bandageng & 451.62 & 451.47 & 1.00\\
+\addlinespace
+Fragmented 100k & \graphite{} Rust & 0.612 & 0.56 & 0.93\\
+                 & \graphite{} OGDF & 0.664 & 0.61 & 0.92\\
+                 & \bandageng & 19.16 & 238.03 & 12.43\\
+                 & \bandage & 46.68 & 46.43 & 0.99\\
+\addlinespace
+MEGAHIT 5G & \graphite{} Rust & 0.510 & 1.62 & 3.18\\
+            & \graphite{} OGDF & 1.53 & 1.49 & 0.97\\
+            & \bandageng & 3.82 & 45.18 & 12.12\\
+            & \bandage & 6.15 & 5.91 & 0.96\\
+\addlinespace
+HPRC chr22 & \graphite{} Rust & 27.67 & 100.93 & 3.63\\
+            & \graphite{} OGDF & 177.69 & 177.55 & 1.00\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Runtime composition}
+Internal timings show that layout remains the largest stage in the largest connected cases. For HPRC chromosome 22, median internal timings were 4.47~s for parsing, 0.77~s for view-graph construction, 18.32~s for initial Rust layout and 3.82~s for SVG export. CUDA reduced initial layout to 8.61~s; its parsing and export times were 4.55 and 3.76~s. On the one-million-segment branched synthetic graph, Rust parsing required 1.10~s and initial layout 8.61~s, compared with 5.35~s for CUDA layout. On the one-million-segment fragmented graph, Rust parsing and layout took 0.91 and 2.66~s; SVG export took another 2.58~s. CUDA layout took 3.15~s for that graph.
+
+\subsection{Canvas responsiveness}
+Table~\ref{tab:canvas-work} reports the CPU-side canvas-work measurements for the Graphite layout. For the million-segment branched graph, the median fitted-overview frame took 1.44~ms and the median 1:1 detail frame took 9.84~ms. The corresponding median 95th-percentile frame times across the five measured processes were 1.49 and 10.28~ms. Building the settled-layout cache took a median 67.01~ms once per measured process, outside the frame timings. The fitted overview produced a median 5,533 shapes per frame, compared with 1,283 at the measured detail view. These CPU-side observations do not establish the application's full presented frame rate or input-to-display latency.
+
+\begin{table}[ht]
+\centering
+\caption{CPU-side graph-canvas frame work on synthetic branched graphs. Values are medians of five measured process-level summaries, each based on 60 frames. The 95th percentile is calculated within each process, then summarized by the median across processes. Cache construction is a separate one-time cost.}
+\label{tab:canvas-work}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Segments & \multicolumn{2}{c}{Overview (ms)} & \multicolumn{2}{c}{Detail (ms)} & Cache (ms)\\
+ & Median & p95 & Median & p95 & \\
+\midrule
+100,000 & 0.98 & 1.02 & 0.93 & 1.04 & 10.09\\
+1,000,000 & 1.44 & 1.49 & 9.84 & 10.28 & 67.01\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion}
+The results indicate that both compact input representation and the Rust-native layout contribute to the scale at which complete assembly graphs can be explored. The optional OGDF backend serves as a validation and reference standard. Because it runs inside the same Graphite parser, graph model and export pipeline, it provides a controlled within-application comparison: OGDF takes approximately 6.82 times as long on the one-million-segment branched graph and 6.42 times as long on HPRC chromosome 22. Chain and fragmented synthetic cases have nearly equal end-to-end times in Graphite. CUDA reduced HPRC end-to-end time by about one third and the branched million-segment case by about one quarter relative to Rust, but its setup and data transfers made it slower on smaller graphs and the chain and fragmented million-segment cases. These measurements characterize the NVIDIA CUDA implementation; the portable Vulkan, Metal and Direct3D backend was not included in the publication run.
+
+The standalone comparison should be interpreted as an end-to-end application benchmark rather than a pure layout-algorithm benchmark. Different viewers make different choices about thread use, process architecture, graph representation and export. The manuscript therefore reports observed wall time and peak RSS and retains timeout/error outcomes instead of extrapolating unobserved completion times.
+
+The standalone benchmark does not include GfaViz, Assembly Graph Browser, ODGI or PangyPlot. Their GFA2, graph-analysis and reference-anchored workflows differ from the load--layout--SVG operation measured here, so the reported times should not be generalized to those applications.
+
+The summary distinguishes timeout from failure. \bandage returned errors on the 500,000- and one-million-segment synthetic cases, whereas \bandageng generally reached the explicit 900~s timeout. All measured \bandage failures in these large synthetic cases exited with code 134 and reported \texttt{std::bad\_alloc}, establishing that they were allocation failures. However, the benchmark harness did not impose an 8~GiB limit and the host exposed 251.3~GiB of RAM. Median peak RSS before failure was approximately 4.28--4.43~GiB for the 500,000-segment cases and 6.80--7.68~GiB for the one-million-segment cases. The data therefore do not establish an 8~GiB cap or system-wide memory exhaustion; an internal application, allocator or AppImage constraint would require separate confirmation.
+
+\graphite focuses on scalable GFA1 visualization rather than reproducing every mature viewer feature. GFA2 is not supported. The browser frontend intentionally applies stricter size and memory limits than the native application because input, graph state, layout state and exports share a bounded WebAssembly address space. Larger assembly and pangenome graphs should therefore be opened in the native application. Future work includes broader graph-format coverage, further interactive-layout tuning and additional large pangenome test cases.
+
+\section{Availability and reproducibility}
+Source code, synthetic-data generation, compatibility fixtures and the publication benchmark harness are available at:
+
+\begin{center}
+\url{https://github.com/CedricHermansBIT/graphite}
+\end{center}
+
+The public browser application is available at:
+
+\begin{center}
+\url{https://cedrichermansbit.github.io/graphite/}
+\end{center}
+
+The benchmark runner records machine metadata, tool commands, environment overrides, wall time, peak RSS, user/system CPU time, exit state and timeout state. The raw records and combined summary underlying the reported tables and figures are stored under \path{paper/benchmark_runs/}, together with per-record provenance and dataset inspections. The manuscript corresponds to Graphite version 0.1.0 and the source tree on the \texttt{paper} branch.
+
+Graphite is distributed under the GNU General Public License version 3.
+
+\section{Conclusion}
+\graphite provides closely matched native desktop and browser workflows for interactive GFA visualization. The Rust backend substantially reduced layout time and memory use on the tested large graphs, completing all one-million-segment synthetic cases and the HPRC chromosome 22 graph within practical analysis times, including cases where existing standalone viewers timed out or failed under the same benchmark protocol. Optional CUDA acceleration further reduced end-to-end time on the large connected graphs, while the CPU backend remained faster for several smaller or fragmented cases. The browser frontend exposes the same core visualization and interaction model within explicit memory and graph-size safeguards, while the native application remains the interface for the largest datasets.
+
+\section*{Author contributions}
+Cedric Hermans: Conceptualization, Software, Methodology, Validation, Investigation, Data curation, Visualization, Writing -- original draft, Writing -- review and editing.
+
+\section*{Competing interests}
+The author declares no competing interests.
+
+\begin{thebibliography}{9}
+\bibitem[Wick et~al.(2015)]{wick2015bandage}
+Wick, R. R., Schultz, M. B., Zobel, J., and Holt, K. E. (2015).
+Bandage: interactive visualization of de novo genome assemblies.
+\emph{Bioinformatics}, 31(20), 3350--3352.
+\href{https://doi.org/10.1093/bioinformatics/btv383}{doi:10.1093/bioinformatics/btv383}.
+
+\bibitem[Gonnella et~al.(2019)]{gonnella2019gfaviz}
+Gonnella, G., Niehus, N., and Kurtz, S. (2019).
+GfaViz: flexible and interactive visualization of GFA sequence graphs.
+\emph{Bioinformatics}, 35(16), 2853--2855.
+\href{https://doi.org/10.1093/bioinformatics/bty1046}{doi:10.1093/bioinformatics/bty1046}.
+
+\bibitem[Mikheenko and Kolmogorov(2019)]{mikheenko2019agb}
+Mikheenko, A. and Kolmogorov, M. (2019).
+Assembly Graph Browser: interactive visualization of assembly graphs.
+\emph{Bioinformatics}, 35(18), 3476--3478.
+\href{https://doi.org/10.1093/bioinformatics/btz072}{doi:10.1093/bioinformatics/btz072}.
+
+\bibitem[Guarracino et~al.(2022)]{guarracino2022odgi}
+Guarracino, A., Heumos, S., Nahnsen, S., Prins, P., and Garrison, E. (2022).
+ODGI: understanding pangenome graphs.
+\emph{Bioinformatics}, 38(13), 3319--3326.
+\href{https://doi.org/10.1093/bioinformatics/btac308}{doi:10.1093/bioinformatics/btac308}.
+
+\bibitem[Mastromatteo et~al.(2026)]{mastromatteo2026pangyplot}
+Mastromatteo, S. et~al. (2026).
+PangyPlot: multi-scale interactive visualization of pangenome variation graphs.
+\emph{Bioinformatics}, 42(8), btag619.
+\href{https://doi.org/10.1093/bioinformatics/btag619}{doi:10.1093/bioinformatics/btag619}.
+
+\bibitem[Hachul and J\"unger(2007)]{hachul2007large}
+Hachul, S. and J\"unger, M. (2007).
+Large-Graph Layout Algorithms at Work: An Experimental Study.
+\emph{Journal of Graph Algorithms and Applications}, 11(2), 345--369.
+\href{https://doi.org/10.7155/jgaa.00150}{doi:10.7155/jgaa.00150}.
+
+\bibitem[Barnes and Hut(1986)]{barnes1986hierarchical}
+Barnes, J. and Hut, P. (1986).
+A hierarchical O(N log N) force-calculation algorithm.
+\emph{Nature}, 324, 446--449.
+\href{https://doi.org/10.1038/324446a0}{doi:10.1038/324446a0}.
+
+\bibitem[GFA Format Specification Working Group(2026)]{gfaspec}
+GFA Format Specification Working Group (2026).
+Graphical Fragment Assembly (GFA) Format Specification.
+\url{https://gfa-spec.github.io/GFA-spec/}. Accessed 22 September 2026.
+
+\bibitem[Mallawaarachchi et~al.(2020)]{graphbin2020}
+Mallawaarachchi, V., Wickramarachchi, A., and Lin, Y. (2020).
+GraphBin: refined binning of metagenomic contigs using assembly graphs.
+\emph{Bioinformatics}, 36(11), 3307--3313.
+\href{https://doi.org/10.1093/bioinformatics/btaa180}{doi:10.1093/bioinformatics/btaa180}.
+
+\bibitem[Wickramarachchi et~al.(2020)]{metabcclr2020}
+Wickramarachchi, A., Mallawaarachchi, V., Rajan, V., and Lin, Y. (2020).
+MetaBCC-LR: metagenomics binning by coverage and composition for long reads.
+\emph{Bioinformatics}, 36(Suppl~1), i3--i11.
+\href{https://doi.org/10.1093/bioinformatics/btaa441}{doi:10.1093/bioinformatics/btaa441}.
+
+\bibitem[Mallawaarachchi et~al.(2026)]{agtools2026}
+Mallawaarachchi, V., Bouras, G., Wick, R. R., Grigson, S. R., Papudeshi, B., and Edwards, R. A. (2026).
+agtools: a software framework to manipulate assembly graphs.
+\emph{Bioinformatics Advances}, 6(1), vbag126.
+\href{https://doi.org/10.1093/bioadv/vbag126}{doi:10.1093/bioadv/vbag126}.
+
+\bibitem[Sereika et~al.(2025)]{sereika2025}
+Sereika, M. et~al. (2025).
+Genome-resolved long-read sequencing expands known microbial diversity across terrestrial habitats.
+\emph{Nature Microbiology}, 10, 2018--2030.
+\href{https://doi.org/10.1038/s41564-025-02062-z}{doi:10.1038/s41564-025-02062-z}.
+
+\end{thebibliography}
+
+\end{document}
