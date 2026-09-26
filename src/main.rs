@@ -1,4 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
