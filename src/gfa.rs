@@ -451,6 +451,8 @@ pub const MAX_WEB_GFA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_WEB_SEGMENTS: usize = 500_000;
 #[cfg(target_arch = "wasm32")]
 const MAX_WEB_CONNECTIONS: usize = 1_000_000;
+#[cfg(target_arch = "wasm32")]
+const MAX_WEB_PATH_WALK_STEPS: usize = 2_000_000;
 
 /// Parse browser-owned bytes; gzip is decoded in bounded chunks before parsing.
 #[cfg(target_arch = "wasm32")]
@@ -484,6 +486,7 @@ pub fn parse_gfa_owned(mut bytes: Vec<u8>) -> Result<GfaGraph> {
     anyhow::ensure!(!bytes.is_empty(), "GFA input is empty");
     let mut segments = 0usize;
     let mut connections = 0usize;
+    let mut path_walk_steps = 0usize;
     for line in bytes.split(|&byte| byte == b'\n') {
         if line.get(1) != Some(&b'\t') {
             continue;
@@ -491,11 +494,31 @@ pub fn parse_gfa_owned(mut bytes: Vec<u8>) -> Result<GfaGraph> {
         match line[0] {
             b'S' => segments += 1,
             b'L' | b'J' | b'C' => connections += 1,
+            b'P' => {
+                if let Some(field) = tab_fields(line).nth(2)
+                    && !field.is_empty()
+                    && field != b"*"
+                {
+                    path_walk_steps = path_walk_steps
+                        .saturating_add(1 + memchr::memchr_iter(b',', field).count());
+                }
+            }
+            b'W' => {
+                if let Some(field) = tab_fields(line).nth(6) {
+                    path_walk_steps = path_walk_steps.saturating_add(
+                        field.iter().filter(|&&byte| byte == b'>' || byte == b'<').count(),
+                    );
+                }
+            }
             _ => {}
         }
         anyhow::ensure!(
             segments <= MAX_WEB_SEGMENTS && connections <= MAX_WEB_CONNECTIONS,
             "GFA has too many records for the browser (limit: 500,000 segments and 1,000,000 connections); open it in desktop Graphite"
+        );
+        anyhow::ensure!(
+            path_walk_steps <= MAX_WEB_PATH_WALK_STEPS,
+            "GFA paths and walks contain too many steps for the browser (limit: 2,000,000); open it in desktop Graphite"
         );
     }
     parse_gfa_bytes_with_control(InputBytes::Owned(bytes), &AtomicBool::new(false))
