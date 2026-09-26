@@ -527,6 +527,10 @@ pub fn generate_png_with_options(
     show_containments: bool,
     options: &FigureOptions,
 ) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        u64::from(options.width) * u64::from(options.height) <= 16_000_000,
+        "Browser PNG exports are limited to 16 million pixels"
+    );
     let image = render_png_impl(
         Some(gfa),
         graph,
