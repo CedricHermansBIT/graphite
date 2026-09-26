@@ -331,8 +331,8 @@ assets/
 
 ## Browser build (experimental)
 
-The `wasm` branch contains a browser viewer sharing Graphite's GFA parser, view graph,
-renderer, Rust layout, native control panels, themes, minimap, and exporters. It opens
+Graphite includes a browser viewer sharing the GFA parser, view graph, renderer, Rust
+layout, native control panels, themes, minimap, and exporters. It opens
 local `.gfa`, `.gfa1`, and `.gz` files. It supports filtering, coloring, paths and walks,
 component browsing, statistics, selection, Pan/Select/Move modes, undo/redo, and SVG,
 PNG, FASTA, CSV, and session downloads. When opening a session, choose its source GFA
@@ -353,9 +353,9 @@ Open <http://localhost:8080>. The server sends `Cross-Origin-Opener-Policy: same
 and `Cross-Origin-Embedder-Policy: require-corp`; production hosting needs those same
 headers because the worker pool uses shared WebAssembly memory. The build script uses
 nightly Cargo with `-Z build-std=std,panic_abort`, and `.cargo/config.toml` enables
-WebAssembly atomics, bulk memory, and imported shared memory. The first browser
-build performs parsing and the initial layout on the UI thread, so large graphs
-can pause the page while opening.
+WebAssembly atomics, bulk memory, and imported shared memory. Parsing, statistics,
+view construction, and the initial layout run on the Rayon worker pool so graph
+loading does not block the browser UI.
 The browser refuses GFA inputs above 256 MiB, gzip streams that expand beyond
 256 MiB, graphs above 500,000 segments or 1,000,000 connections, paths/walks above
 2,000,000 total steps, layouts above 3,000,000 physics points, sessions above 128 MiB,
@@ -364,12 +364,12 @@ large GFA files.
 
 ### GitHub Pages
 
-`.github/workflows/pages.yml` builds the `wasm` branch and deploys `web/` to
+`.github/workflows/pages.yml` builds the `main` branch and deploys `web/` to
 GitHub Pages. The expected project URL is
 <https://cedrichermansbit.github.io/graphite/>.
 
 Enable Pages once in **Settings → Pages → Build and deployment → Source → GitHub
-Actions**. After that, pushes to the `wasm` branch deploy automatically.
+Actions**. After that, pushes to `main` deploy automatically.
 
 GitHub Pages does not expose custom per-response COOP/COEP headers. Graphite therefore
 ships a small same-origin service worker that injects the headers before the threaded
