@@ -1,0 +1,141 @@
+diff --git a/src/main.rs b/src/main.rs
+index e5eaf0f..bc67215 100755
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -21,0 +22 @@ mod ui;
++mod ui_benchmark;
+@@ -42,0 +44,4 @@ struct Args {
++    /// number of measured CPU-side canvas frames per view in benchmark mode
++    #[argh(option, default = "0")]
++    benchmark_ui_frames: usize,
++
+@@ -99,0 +105 @@ fn run_benchmark(
++    ui_frames: usize,
+@@ -130,0 +137,5 @@ fn run_benchmark(
++    if ui_frames > 0 && (view.node_count() == 0 || layout.positions.is_empty()) {
++        anyhow::bail!("UI frame benchmark requires a non-empty graph");
++    }
++    let ui_benchmark = (ui_frames > 0).then(|| ui_benchmark::measure(&view, &layout, ui_frames));
++
+@@ -208,0 +220 @@ fn run_benchmark(
++        "ui_benchmark": ui_benchmark,
+@@ -239,0 +252 @@ fn main() -> Result<()> {
++            args.benchmark_ui_frames,
+diff --git a/src/ui_benchmark.rs b/src/ui_benchmark.rs
+new file mode 100644
+index 0000000..3daa7a8
+--- /dev/null
++++ b/src/ui_benchmark.rs
+@@ -0,0 +1,112 @@
++//! Opt-in, display-independent measurement of the canvas's CPU-side frame work.
++//! This exercises the same `draw_graph` path as the desktop UI, followed by egui
++//! tessellation. It does not measure window-system input latency or GPU display.
++
++use egui::{Context, LayerId, Order, Pos2, Rect, Vec2};
++use serde_json::{Value, json};
++use std::time::Instant;
++
++use crate::graph::ViewGraph;
++use crate::layout::Layout;
++use crate::render::{RenderCache, RenderParams, draw_graph_cached};
++use crate::selection::Selection;
++
++const WARMUP_FRAMES: usize = 10;
++const VIEWPORT_WIDTH: f32 = 1280.0;
++const VIEWPORT_HEIGHT: f32 = 720.0;
++
++fn median(sorted: &[f64]) -> f64 {
++    let middle = sorted.len() / 2;
++    if sorted.len().is_multiple_of(2) {
++        (sorted[middle - 1] + sorted[middle]) / 2.0
++    } else {
++        sorted[middle]
++    }
++}
++
++fn measure_view(
++    graph: &ViewGraph,
++    layout: &Layout,
++    frames: usize,
++    zoom: f32,
++    center: [f32; 2],
++    cache: &RenderCache,
++) -> Value {
++    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT));
++    let ctx = Context::default();
++    let selection = Selection::default();
++    let mut timings = Vec::with_capacity(frames);
++    let mut shapes = Vec::with_capacity(frames);
++
++    for frame in 0..WARMUP_FRAMES + frames {
++        // A 480-pixel horizontal pan traversed in both directions. The graph,
++        // layout and egui context remain loaded between frames.
++        let phase = frame as f32 / (WARMUP_FRAMES + frames - 1).max(1) as f32;
++        let pan_x = 240.0 * (2.0 * std::f32::consts::PI * phase).sin();
++        let params = RenderParams {
++            zoom,
++            pan: Vec2::new(-center[0] * zoom + pan_x, -center[1] * zoom),
++            ..Default::default()
++        };
++        let start = Instant::now();
++        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
++            let painter = ui
++                .ctx()
++                .layer_painter(LayerId::new(Order::Middle, egui::Id::new("graph")));
++            draw_graph_cached(
++                &painter, viewport, graph, layout, &selection, &params, cache,
++            );
++        });
++        let shape_count = output.shapes.len();
++        let primitives =
++            ctx.tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
++        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
++        drop(primitives);
++        output.textures_delta.clear();
++        if frame >= WARMUP_FRAMES {
++            timings.push(elapsed_ms);
++            shapes.push(shape_count);
++        }
++    }
++
++    let mut sorted = timings.clone();
++    sorted.sort_by(f64::total_cmp);
++    shapes.sort_unstable();
++    let p95_index = ((sorted.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
++    json!({
++        "zoom": zoom,
++        "median_ms": median(&sorted),
++        "p95_ms": sorted[p95_index],
++        "median_shapes": shapes[shapes.len() / 2],
++        "frame_ms": timings,
++    })
++}
++
++pub fn measure(graph: &ViewGraph, layout: &Layout, frames: usize) -> Value {
++    let cache_start = Instant::now();
++    let cache = RenderCache::new(graph, layout);
++    let cache_build_ms = cache_start.elapsed().as_secs_f64() * 1000.0;
++    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
++    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
++    for &[x, y] in &layout.positions {
++        min_x = min_x.min(x);
++        min_y = min_y.min(y);
++        max_x = max_x.max(x);
++        max_y = max_y.max(y);
++    }
++    let center = [(min_x + max_x) * 0.5, (min_y + max_y) * 0.5];
++    let zoom = (VIEWPORT_WIDTH * 0.85 / (max_x - min_x).max(1.0))
++        .min(VIEWPORT_HEIGHT * 0.85 / (max_y - min_y).max(1.0))
++        .clamp(0.00001, 1000.0);
++    let detail_center = layout.center(graph.node_count() / 2);
++
++    json!({
++        "scope": "CPU-side graph canvas construction plus egui tessellation; no GPU, OS input, panels or minimap",
++        "viewport_px": [VIEWPORT_WIDTH, VIEWPORT_HEIGHT],
++        "warmup_frames": WARMUP_FRAMES,
++        "measured_frames": frames,
++        "cache_build_ms": cache_build_ms,
++        "overview": measure_view(graph, layout, frames, zoom, center, &cache),
++        "detail": measure_view(graph, layout, frames, 1.0, detail_center, &cache),
++    })
++}

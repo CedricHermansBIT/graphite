@@ -13,8 +13,10 @@ This file summarizes the environment and protocol for the results reported in th
 - RSS sampling interval: 50 ms
 - Graphite Rust, CUDA and OGDF: `RAYON_NUM_THREADS=8`
 - CUDA device: NVIDIA H100 PCIe (81,559 MiB), driver 580.178.04, CUDA 12.4 NVRTC selected through `LD_LIBRARY_PATH`
+- Graphite source: `v0.1.0`, commit `c873f8b491afe3f8896d40288f87f2a4653fde19`
+- Graphite publication binary SHA-256: `29e4ea393dead0db448e88975b5be67c755c7ad09b799792c2d1c5687d2e1621`; build features `cuda,ogdf`
 
-All reported Graphite benchmark records completed successfully. Peak RSS is host-process memory and does not include CUDA device memory.
+All 540 Graphite benchmark records completed successfully, and all 180 GPU records selected CUDA. Peak RSS is host-process memory and does not include CUDA device memory.
 
 ## Comparator software
 
@@ -22,6 +24,7 @@ All reported Graphite benchmark records completed successfully. Peak RSS is host
 - BandageNG 2026.9.1
 
 Graphite and comparator measurements were collected on the same host using the same datasets, timeout, and RSS-sampling protocol. They were collected in separate serial benchmark sessions, so session-level variation remains possible.
+The Graphite run was collected on 26 September 2026; the unchanged comparator measurements were collected on 21 September 2026. Inspection of all 30 datasets matched the comparator-run metadata, including file size and GFA record counts.
 
 ## Memory-limit note
 
@@ -30,6 +33,7 @@ The benchmark harness did not impose an 8 GiB memory restriction on Bandage. The
 ## CPU-side canvas measurements
 
 The manuscript also reports CPU-side canvas construction and egui tessellation for synthetic branched 100k and 1M graphs. Each dataset used one process warm-up followed by five measured processes, with 10 warm-up frames and 60 timed frames per viewport. These measurements exclude GPU rendering, display presentation, input delivery, other interface panels, and the minimap; they are therefore a canvas-work measurement rather than a presented-frame-rate benchmark.
+The 26 September canvas run used the `v0.1.0` source with only an archived measurement command-line patch. Its binary hash, dataset hashes, raw frames, and patch are in `paper/benchmark_runs/canvas-2026-09-26-c873f8b/`.
 
 ## Browser build
 

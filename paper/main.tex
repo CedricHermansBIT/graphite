@@ -28,7 +28,7 @@ Howest University of Applied Sciences, Belgium\\
 \begin{abstract}
 Assembly graphs retain connectivity information that is lost when an assembly is considered only as a set of contigs, but whole-graph visualization becomes increasingly expensive as assembly and pangenome graphs grow. We present \graphite, an interactive GFA viewer available as a native desktop application and as a WebAssembly browser application. The two frontends share the same GFA parser, filtered graph model, Rust-native multilevel layout, rendering logic and interaction model. Native \graphite uses memory-mapped input, while the browser operates on local files held in WebAssembly memory. \graphite supports core GFA1 records together with GFA1.1 walks and GFA1.2 jumps, component filtering and ordering, path and walk overlays, direct graph manipulation, sessions, and SVG, PNG, FASTA and CSV export.
 
-In controlled synthetic benchmarks with one warm-up and five measured repetitions, the Rust layout backend processed one-million-segment chain, branched and fragmented graphs in 5.69, 13.29 and 7.02~s, respectively. The optional CUDA backend reduced the branched case to 10.12~s but was slower on chain and fragmented graphs. \bandageng exceeded the 900~s timeout on all three one-million-segment cases, while \bandage returned errors for all measured 500,000- and one-million-segment runs in the present benchmark environment. On an HPRC chromosome 22 graph, \graphite completed in 27.67~s with Rust layout and 18.39~s with CUDA, whereas both external viewers exceeded 900~s.
+In controlled synthetic benchmarks with one warm-up and five measured repetitions, the Rust layout backend processed one-million-segment chain, branched and fragmented graphs in 5.70, 13.37 and 7.17~s, respectively. The optional CUDA backend reduced the branched case to 10.38~s but was slower on chain and fragmented graphs. \bandageng exceeded the 900~s timeout on all three one-million-segment cases, while \bandage returned errors for all measured 500,000- and one-million-segment runs in the present benchmark environment. On an HPRC chromosome 22 graph, \graphite completed in 28.00~s with Rust layout and 19.61~s with CUDA, whereas both external viewers exceeded 900~s.
 \end{abstract}
 
 \section{Introduction}
@@ -186,7 +186,7 @@ Publication mode runs tools serially. Each tool/dataset pair receives one warm-u
 
 We separately measured CPU-side canvas work using the same graph drawing path as the desktop application. After loading and initial layout, a fixed 1280-by-720-pixel viewport was panned horizontally over 480 pixels at both fit-to-screen and 1:1 zoom; the detail view was centered on the middle segment. Each view had 10 warm-up frames and 60 timed frames; each graph had one process warm-up followed by five measured processes. Timings include egui shape construction and tessellation after building the settled-layout render cache. Cache construction is reported separately. The measurements exclude input delivery, other interface panels, the minimap, GPU rendering and display presentation, so they measure a canvas-work proxy rather than complete interaction latency. No comparator viewer was measured with this protocol.
 
-Benchmarks were run on Linux 6.8.0-142-generic (x86-64, glibc 2.39) on an Intel Xeon Silver 4310 CPU at 2.10~GHz with 48 logical CPUs and 251.3~GiB of system memory. The CUDA backend used an NVIDIA H100 PCIe with 80~GiB of device memory, driver 580.178.04 and CUDA 12.4 NVRTC. The benchmark harness used Python 3.12.3. Publication mode was serial (\texttt{jobs=1}), adaptive repetitions were disabled, and no contention warning was reported. The native parser, graph-construction, layout and export code paths measured by the benchmark are the implementations described in this manuscript.
+Benchmarks were run on Linux 6.8.0-142-generic (x86-64, glibc 2.39) on an Intel Xeon Silver 4310 CPU at 2.10~GHz with 48 logical CPUs and 251.3~GiB of system memory. The CUDA backend used an NVIDIA H100 PCIe with 80~GiB of device memory, driver 580.178.04 and CUDA 12.4 NVRTC. The benchmark harness used Python 3.12.3. Publication mode was serial (\texttt{jobs=1}), adaptive repetitions were disabled, and no contention warning was reported. Graphite measurements used source commit \texttt{c873f8b491afe3f8896d40288f87f2a4653fde19}, designated release \texttt{v0.1.0}; all 540 Graphite runs succeeded and all 180 GPU runs selected CUDA. The native parser, graph-construction, layout and export code paths measured by the benchmark are the implementations described in this manuscript. Canvas measurements used the same source revision with a measurement-only command-line patch archived alongside their raw records.
 
 For the publication benchmarks, the optional CUDA and OGDF backends were enabled alongside the default Rust backend. All three \graphite backends were run with \texttt{RAYON\_NUM\_THREADS=8}; CUDA used the installed 12.4 runtime compiler library. No thread-related environment override was supplied to standalone \bandage or \bandageng. \bandageng was version 2026.9.1, and the standalone \bandage executable was the Ubuntu x86-64 v0.9.0 AppImage.
 
@@ -194,7 +194,7 @@ No 8~GiB memory limit was configured by the benchmark harness: the machine expos
 
 \section{Results}
 \subsection{Synthetic scaling}
-At one million segments, the Rust backend completed all three controlled topologies in 5.69--13.29~s. CUDA took 6.41~s on the chain, 10.12~s on the branched graph and 7.68~s on the fragmented graph. The optional OGDF reference backend, used as an internal validation and comparison standard, required 5.65--90.59~s. \bandageng exceeded the 900~s timeout on all three one-million-segment cases, and \bandage returned errors for all measured 500,000- and one-million-segment cases (Table~\ref{tab:synthetic-million}). Figure~\ref{fig:synthetic-scaling} shows the full branched and fragmented scaling curves, with exact wall times in Table~\ref{tab:synthetic-wall}.
+At one million segments, the Rust backend completed all three controlled topologies in 5.70--13.37~s. CUDA took 6.56~s on the chain, 10.38~s on the branched graph and 8.14~s on the fragmented graph. The optional OGDF reference backend, used as an internal validation and comparison standard, required 5.80--86.51~s. \bandageng exceeded the 900~s timeout on all three one-million-segment cases, and \bandage returned errors for all measured 500,000- and one-million-segment cases (Table~\ref{tab:synthetic-million}). Figure~\ref{fig:synthetic-scaling} shows the full branched and fragmented scaling curves, with exact wall times in Table~\ref{tab:synthetic-wall}.
 
 \begin{table}[ht]
 \centering
@@ -205,30 +205,30 @@ At one million segments, the Rust backend completed all three controlled topolog
 \toprule
 Topology & Tool & Time (s) & Peak RSS (GiB)\\
 \midrule
-Chain & \graphite{} Rust & 5.69 & 1.78\\
-      & \graphite{} CUDA & 6.41 & 1.83\\
-      & \graphite{} OGDF & 5.65 & 1.78\\
+Chain & \graphite{} Rust & 5.70 & 1.78\\
+      & \graphite{} CUDA & 6.56 & 1.83\\
+      & \graphite{} OGDF & 5.80 & 1.78\\
       & \bandageng & TO & --\\
       & \bandage & ERR & --\\
 \addlinespace
-Branched & \graphite{} Rust & 13.29 & 1.80\\
-         & \graphite{} CUDA & 10.12 & 1.84\\
-         & \graphite{} OGDF & 90.59 & 5.35\\
+Branched & \graphite{} Rust & 13.37 & 1.80\\
+         & \graphite{} CUDA & 10.38 & 1.84\\
+         & \graphite{} OGDF & 86.51 & 5.34\\
          & \bandageng & TO & --\\
          & \bandage & ERR & --\\
 \addlinespace
-Fragmented & \graphite{} Rust & 7.02 & 1.81\\
-           & \graphite{} CUDA & 7.68 & 1.85\\
-           & \graphite{} OGDF & 7.17 & 1.81\\
+Fragmented & \graphite{} Rust & 7.17 & 1.81\\
+           & \graphite{} CUDA & 8.14 & 1.85\\
+           & \graphite{} OGDF & 7.43 & 1.81\\
            & \bandageng & TO & --\\
            & \bandage & ERR & --\\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On the 500,000-segment branched graph, \graphite Rust completed in 6.83~s with 0.94~GiB peak RSS, while CUDA took 5.61~s with 1.01~GiB; \bandageng took 451.62~s and 10.39~GiB. On the 100,000-segment branched graph, \graphite Rust required 1.38~s and 221~MiB, while CUDA required 1.58~s and 331~MiB. \bandageng required 70.10~s and 2.25~GiB and \bandage required 67.91~s and 1.72~GiB.
+On the 500,000-segment branched graph, \graphite Rust completed in 6.86~s with 0.94~GiB peak RSS, while CUDA took 5.71~s with 1.01~GiB; \bandageng took 451.62~s and 10.39~GiB. On the 100,000-segment branched graph, \graphite Rust required 1.38~s and 221~MiB, while CUDA required 1.63~s and 330~MiB. \bandageng required 70.10~s and 2.25~GiB and \bandage required 67.91~s and 1.72~GiB.
 
-For fragmented graphs, the one-million-segment Rust run completed in 7.02~s with 1.81~GiB peak RSS; CUDA took 7.68~s with 1.85~GiB. At 500,000 segments Rust completed in 3.41~s with 924~MiB, while \bandageng timed out and \bandage failed. The Graphite OGDF backend had nearly identical end-to-end times for the chain and fragmented cases, while Rust was 6.82 times faster than OGDF on the large branched graph.
+For fragmented graphs, the one-million-segment Rust run completed in 7.17~s with 1.81~GiB peak RSS; CUDA took 8.14~s with 1.85~GiB. At 500,000 segments Rust completed in 3.40~s with 924~MiB, while \bandageng timed out and \bandage failed. The Graphite OGDF backend had nearly identical end-to-end times for the chain and fragmented cases, while Rust was 6.47 times faster than OGDF on the large branched graph.
 
 \begin{figure}[ht]
 \centering
@@ -247,23 +247,23 @@ For fragmented graphs, the one-million-segment Rust run completed in 7.02~s with
 \toprule
 Dataset & Graphite Rust & Graphite CUDA & Graphite OGDF & BandageNG & Bandage\\
 \midrule
-Branched 10k & 0.510 & 0.867 & 2.447 & 5.387 & 6.353\\
-Branched 100k & 1.377 & 1.582 & 7.995 & 70.103 & 67.913\\
-Branched 500k & 6.83 & 5.61 & 42.30 & 451.62 & ERR\\
-Branched 1M & 13.29 & 10.12 & 90.59 & TO & ERR\\
+Branched 10k & 0.559 & 0.866 & 2.190 & 5.387 & 6.353\\
+Branched 100k & 1.376 & 1.627 & 7.733 & 70.103 & 67.913\\
+Branched 500k & 6.86 & 5.71 & 40.79 & 451.62 & ERR\\
+Branched 1M & 13.37 & 10.38 & 86.51 & TO & ERR\\
 \addlinespace
 Fragmented 10k & 0.103 & 0.511 & 0.103 & 1.528 & 4.980\\
-Fragmented 100k & 0.612 & 1.122 & 0.664 & 19.160 & 46.682\\
-Fragmented 500k & 3.41 & 3.87 & 3.31 & TO & ERR\\
-Fragmented 1M & 7.02 & 7.68 & 7.17 & TO & ERR\\
+Fragmented 100k & 0.664 & 1.070 & 0.612 & 19.160 & 46.682\\
+Fragmented 500k & 3.40 & 3.97 & 3.46 & TO & ERR\\
+Fragmented 1M & 7.17 & 8.14 & 7.43 & TO & ERR\\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Real assembly graphs}
-On the SPAdes ESC graph, \graphite Rust completed in 0.205~s with 19.2~MiB peak RSS, compared with 1.12~s and 55.8~MiB for \bandageng and 1.78~s and 67.4~MiB for \bandage. On the MEGAHIT 5G graph, the corresponding values were 0.510~s and 56.4~MiB for \graphite Rust, 3.82~s and 360~MiB for \bandageng, and 6.15~s and 299~MiB for \bandage.
+On the SPAdes ESC graph, \graphite Rust completed in 0.205~s with 19.2~MiB peak RSS, compared with 1.12~s and 55.8~MiB for \bandageng and 1.78~s and 67.4~MiB for \bandage. On the MEGAHIT 5G graph, the corresponding values were 0.509~s and 56.6~MiB for \graphite Rust, 3.82~s and 360~MiB for \bandageng, and 6.15~s and 299~MiB for \bandage.
 
-The largest real graph produced the clearest separation. On HPRC chromosome 22, \graphite Rust completed in 27.67~s with 3.81~GiB peak RSS. CUDA completed in 18.39~s with 3.90~GiB, and the optional OGDF reference backend completed in 177.69~s with 10.00~GiB. Standalone \bandage and \bandageng both exceeded 900~s on all five measured runs. Figures~\ref{fig:real-wall} and~\ref{fig:real-rss} compare the real-graph wall times and peak memory; Tables~\ref{tab:real-wall} and~\ref{tab:real-rss} give the corresponding values.
+The largest real graph produced the clearest separation. On HPRC chromosome 22, \graphite Rust completed in 28.00~s with 3.81~GiB peak RSS. CUDA completed in 19.61~s with 3.90~GiB, and the optional OGDF reference backend completed in 167.48~s with 9.99~GiB. Standalone \bandage and \bandageng both exceeded 900~s on all five measured runs. Figures~\ref{fig:real-wall} and~\ref{fig:real-rss} compare the real-graph wall times and peak memory; Tables~\ref{tab:real-wall} and~\ref{tab:real-rss} give the corresponding values.
 
 \begin{figure}[ht]
 \centering
@@ -288,13 +288,13 @@ The largest real graph produced the clearest separation. On HPRC chromosome 22, 
 \toprule
 Dataset & Graphite Rust & Graphite CUDA & Graphite OGDF & BandageNG & Bandage\\
 \midrule
-BRCA2 & 0.205 & 0.562 & 0.357 & 0.764 & 1.069\\
-SPAdes ESC & 0.205 & 0.613 & 0.662 & 1.120 & 1.781\\
-Flye & 0.103 & 0.511 & 0.103 & 0.510 & 0.764\\
-MEGAHIT 5G & 0.510 & 1.272 & 1.527 & 3.822 & 6.149\\
+BRCA2 & 0.205 & 0.612 & 0.357 & 0.764 & 1.069\\
+SPAdes ESC & 0.205 & 0.612 & 0.561 & 1.120 & 1.781\\
+Flye & 0.103 & 0.510 & 0.103 & 0.510 & 0.764\\
+MEGAHIT 5G & 0.509 & 1.273 & 1.478 & 3.822 & 6.149\\
 myloasm & 0.052 & 0.459 & 0.052 & 0.204 & 0.255\\
 hifiasm chr11 & 0.052 & 0.459 & 0.052 & 0.255 & 0.357\\
-HPRC chr22 & 27.67 & 18.39 & 177.69 & TO & TO\\
+HPRC chr22 & 28.00 & 19.61 & 167.48 & TO & TO\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -308,25 +308,25 @@ HPRC chr22 & 27.67 & 18.39 & 177.69 & TO & TO\\
 \toprule
 Dataset & Graphite Rust & Graphite CUDA & Graphite OGDF & BandageNG & Bandage\\
 \midrule
-BRCA2 & 11.3 & 162.1 & 18.1 & 53.4 & 41.8\\
-SPAdes ESC & 19.2 & 172.5 & 25.6 & 55.8 & 67.4\\
+BRCA2 & 11.3 & 162.2 & 18.1 & 53.4 & 41.8\\
+SPAdes ESC & 19.2 & 172.3 & 25.2 & 55.8 & 67.4\\
 Flye & 30.5 & 169.9 & 30.5 & 42.2 & 79.6\\
-MEGAHIT 5G & 56.4 & 205.6 & 70.2 & 360.2 & 299.0\\
-myloasm & 8.8 & 147.7 & 8.7 & 29.0 & 21.9\\
-hifiasm chr11 & 10.2 & 149.0 & 10.2 & 32.1 & 36.5\\
-HPRC chr22 & 3903 & 3990 & 10240 & TO & TO\\
+MEGAHIT 5G & 56.6 & 205.4 & 70.2 & 360.2 & 299.0\\
+myloasm & 9.1 & 147.6 & 8.8 & 29.0 & 21.9\\
+hifiasm chr11 & 10.3 & 149.0 & 10.2 & 32.1 & 36.5\\
+HPRC chr22 & 3903 & 3990 & 10234 & TO & TO\\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{CPU utilization and total CPU work}
-CPU accounting shows that the wall-time differences cannot be explained simply by Graphite consuming more cores. Table~\ref{tab:cpu} summarizes representative CPU utilization for CPU-only backends; CUDA device work is outside this accounting. On the 500,000-segment branched graph, \graphite Rust used a median 22.47 CPU-s over 6.83~s wall time, with 3.22 median average cores per run. The optional OGDF reference backend used 42.21 CPU-s over 42.30~s (approximately one core), while \bandageng used 451.47 CPU-s over 451.62~s (also approximately one core). Thus the Rust backend was 66.2-fold faster in wall time than \bandageng while consuming about 20-fold less total CPU time on this workload.
+CPU accounting shows that the wall-time differences cannot be explained simply by Graphite consuming more cores. Table~\ref{tab:cpu} summarizes representative CPU utilization for CPU-only backends; CUDA device work is outside this accounting. On the 500,000-segment branched graph, \graphite Rust used a median 22.33 CPU-s over 6.86~s wall time, with 3.21 median average cores per run. The optional OGDF reference backend used 40.74 CPU-s over 40.79~s (approximately one core), while \bandageng used 451.47 CPU-s over 451.62~s (also approximately one core). Thus the Rust backend was 65.9-fold faster in wall time than \bandageng while consuming about 20-fold less total CPU time on this workload.
 
-The difference is even more pronounced for fragmented graphs, where \bandageng uses substantially more parallelism. On the 100,000-segment fragmented graph, \graphite Rust used 0.56 CPU-s over 0.612~s, or 0.93 median average cores per run, whereas \bandageng used 238.03 CPU-s over 19.16~s, or 12.43 average cores. \graphite completed 31.3-fold sooner while consuming much less total CPU time. On the MEGAHIT 5G graph, \graphite Rust used 1.62 CPU-s over 0.510~s (3.18 average cores), compared with 45.18 CPU-s over 3.82~s (12.12 average cores) for \bandageng.
+The difference is even more pronounced for fragmented graphs, where \bandageng uses substantially more parallelism. On the 100,000-segment fragmented graph, \graphite Rust used 0.61 CPU-s over 0.664~s, or 0.92 median average cores per run, whereas \bandageng used 238.03 CPU-s over 19.16~s, or 12.43 average cores. \graphite completed 28.9-fold sooner while consuming much less total CPU time. On the MEGAHIT 5G graph, \graphite Rust used 1.71 CPU-s over 0.509~s (3.35 average cores), compared with 45.18 CPU-s over 3.82~s (12.12 average cores) for \bandageng.
 
-On HPRC chromosome 22, \graphite Rust consumed 100.93 CPU-s over 27.67~s, corresponding to 3.63 median average cores per run. The OGDF reference backend consumed 177.55 CPU-s over 177.69~s, or approximately one core. CPU totals are unavailable for the standalone \bandage and \bandageng HPRC runs because they reached the 900~s timeout.
+On HPRC chromosome 22, \graphite Rust consumed 101.78 CPU-s over 28.00~s, corresponding to 3.63 median average cores per run. The OGDF reference backend consumed 167.36 CPU-s over 167.48~s, or approximately one core. CPU totals are unavailable for the standalone \bandage and \bandageng HPRC runs because they reached the 900~s timeout.
 
-These results also separate the effects of parallelism from algorithmic work. On the one-million-segment branched graph, Rust used less than half the total CPU time of OGDF (43.72 versus 90.50 CPU-s), while parallel execution further reduced wall time from 90.59 to 13.29~s. On the one-million-segment fragmented graph, both backends used approximately 7.0 CPU-s and 7.0~s wall time, so the end-to-end comparison shows little backend difference for this topology.
+These results also separate the effects of parallelism from algorithmic work. On the one-million-segment branched graph, Rust used less than half the total CPU time of OGDF (42.99 versus 86.38 CPU-s), while parallel execution further reduced wall time from 86.51 to 13.37~s. On the one-million-segment fragmented graph, both backends used approximately 7.1--7.3 CPU-s and 7.2--7.4~s wall time, so the end-to-end comparison shows little backend difference for this topology.
 
 \begin{table}[ht]
 \centering
@@ -337,31 +337,31 @@ These results also separate the effects of parallelism from algorithmic work. On
 \toprule
 Dataset & Tool & Wall (s) & CPU (s) & Avg. cores\\
 \midrule
-Branched 500k & \graphite{} Rust & 6.83 & 22.47 & 3.22\\
-               & \graphite{} OGDF & 42.30 & 42.21 & 1.00\\
+Branched 500k & \graphite{} Rust & 6.86 & 22.33 & 3.21\\
+               & \graphite{} OGDF & 40.79 & 40.74 & 1.00\\
                & \bandageng & 451.62 & 451.47 & 1.00\\
 \addlinespace
-Fragmented 100k & \graphite{} Rust & 0.612 & 0.56 & 0.93\\
-                 & \graphite{} OGDF & 0.664 & 0.61 & 0.92\\
+Fragmented 100k & \graphite{} Rust & 0.664 & 0.61 & 0.92\\
+                 & \graphite{} OGDF & 0.612 & 0.56 & 0.92\\
                  & \bandageng & 19.16 & 238.03 & 12.43\\
                  & \bandage & 46.68 & 46.43 & 0.99\\
 \addlinespace
-MEGAHIT 5G & \graphite{} Rust & 0.510 & 1.62 & 3.18\\
-            & \graphite{} OGDF & 1.53 & 1.49 & 0.97\\
+MEGAHIT 5G & \graphite{} Rust & 0.509 & 1.71 & 3.35\\
+            & \graphite{} OGDF & 1.48 & 1.46 & 0.98\\
             & \bandageng & 3.82 & 45.18 & 12.12\\
             & \bandage & 6.15 & 5.91 & 0.96\\
 \addlinespace
-HPRC chr22 & \graphite{} Rust & 27.67 & 100.93 & 3.63\\
-            & \graphite{} OGDF & 177.69 & 177.55 & 1.00\\
+HPRC chr22 & \graphite{} Rust & 28.00 & 101.78 & 3.63\\
+            & \graphite{} OGDF & 167.48 & 167.36 & 1.00\\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Runtime composition}
-Internal timings show that layout remains the largest stage in the largest connected cases. For HPRC chromosome 22, median internal timings were 4.47~s for parsing, 0.77~s for view-graph construction, 18.32~s for initial Rust layout and 3.82~s for SVG export. CUDA reduced initial layout to 8.61~s; its parsing and export times were 4.55 and 3.76~s. On the one-million-segment branched synthetic graph, Rust parsing required 1.10~s and initial layout 8.61~s, compared with 5.35~s for CUDA layout. On the one-million-segment fragmented graph, Rust parsing and layout took 0.91 and 2.66~s; SVG export took another 2.58~s. CUDA layout took 3.15~s for that graph.
+Internal timings show that layout remains the largest stage in the largest connected cases. For HPRC chromosome 22, median internal timings were 4.62~s for parsing, 0.79~s for view-graph construction, 18.12~s for initial Rust layout and 3.80~s for SVG export. CUDA reduced initial layout to 9.65~s; its parsing and export times were 4.58 and 3.78~s. On the one-million-segment branched synthetic graph, Rust parsing required 1.20~s and initial layout 8.60~s, compared with 5.48~s for CUDA layout. On the one-million-segment fragmented graph, Rust parsing and layout took 1.01 and 2.71~s; SVG export took another 2.67~s. CUDA layout took 3.19~s for that graph.
 
 \subsection{Canvas responsiveness}
-Table~\ref{tab:canvas-work} reports the CPU-side canvas-work measurements for the Graphite layout. For the million-segment branched graph, the median fitted-overview frame took 1.44~ms and the median 1:1 detail frame took 9.84~ms. The corresponding median 95th-percentile frame times across the five measured processes were 1.49 and 10.28~ms. Building the settled-layout cache took a median 67.01~ms once per measured process, outside the frame timings. The fitted overview produced a median 5,533 shapes per frame, compared with 1,283 at the measured detail view. These CPU-side observations do not establish the application's full presented frame rate or input-to-display latency.
+Table~\ref{tab:canvas-work} reports the CPU-side canvas-work measurements for the Graphite layout. For the million-segment branched graph, the median fitted-overview frame took 1.62~ms and the median 1:1 detail frame took 9.86~ms. The corresponding median 95th-percentile frame times across the five measured processes were 1.68 and 10.11~ms. Building the settled-layout cache took a median 69.57~ms once per measured process, outside the frame timings. The fitted overview produced a median 5,533 shapes per frame, compared with 1,283 at the measured detail view. These CPU-side observations do not establish the application's full presented frame rate or input-to-display latency.
 
 \begin{table}[ht]
 \centering
@@ -373,14 +373,14 @@ Table~\ref{tab:canvas-work} reports the CPU-side canvas-work measurements for th
 Segments & \multicolumn{2}{c}{Overview (ms)} & \multicolumn{2}{c}{Detail (ms)} & Cache (ms)\\
  & Median & p95 & Median & p95 & \\
 \midrule
-100,000 & 0.98 & 1.02 & 0.93 & 1.04 & 10.09\\
-1,000,000 & 1.44 & 1.49 & 9.84 & 10.28 & 67.01\\
+100,000 & 1.01 & 1.05 & 0.90 & 1.08 & 10.49\\
+1,000,000 & 1.62 & 1.68 & 9.86 & 10.11 & 69.57\\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \section{Discussion}
-The results indicate that both compact input representation and the Rust-native layout contribute to the scale at which complete assembly graphs can be explored. The optional OGDF backend serves as a validation and reference standard. Because it runs inside the same Graphite parser, graph model and export pipeline, it provides a controlled within-application comparison: OGDF takes approximately 6.82 times as long on the one-million-segment branched graph and 6.42 times as long on HPRC chromosome 22. Chain and fragmented synthetic cases have nearly equal end-to-end times in Graphite. CUDA reduced HPRC end-to-end time by about one third and the branched million-segment case by about one quarter relative to Rust, but its setup and data transfers made it slower on smaller graphs and the chain and fragmented million-segment cases. These measurements characterize the NVIDIA CUDA implementation; the portable Vulkan, Metal and Direct3D backend was not included in the publication run.
+The results indicate that both compact input representation and the Rust-native layout contribute to the scale at which complete assembly graphs can be explored. The optional OGDF backend serves as a validation and reference standard. Because it runs inside the same Graphite parser, graph model and export pipeline, it provides a controlled within-application comparison: OGDF takes approximately 6.47 times as long on the one-million-segment branched graph and 5.98 times as long on HPRC chromosome 22. Chain and fragmented synthetic cases have nearly equal end-to-end times in Graphite. CUDA reduced HPRC end-to-end time by about 30\% and the branched million-segment case by about 22\% relative to Rust, but its setup and data transfers made it slower on smaller graphs and the chain and fragmented million-segment cases. These measurements characterize the NVIDIA CUDA implementation; the portable Vulkan, Metal and Direct3D backend was not included in the publication run.
 
 The standalone comparison should be interpreted as an end-to-end application benchmark rather than a pure layout-algorithm benchmark. Different viewers make different choices about thread use, process architecture, graph representation and export. The manuscript therefore reports observed wall time and peak RSS and retains timeout/error outcomes instead of extrapolating unobserved completion times.
 
@@ -403,7 +403,7 @@ The public browser application is available at:
 \url{https://cedrichermansbit.github.io/graphite/}
 \end{center}
 
-The benchmark runner records machine metadata, tool commands, environment overrides, wall time, peak RSS, user/system CPU time, exit state and timeout state. The raw records and combined summary underlying the reported tables and figures are stored under \path{paper/benchmark_runs/}, together with per-record provenance and dataset inspections. The manuscript corresponds to Graphite version 0.1.0 and the source tree on the \texttt{paper} branch.
+The benchmark runner records machine metadata, tool commands, environment overrides, wall time, peak RSS, user/system CPU time, exit state and timeout state. The raw records and combined summary underlying the reported tables and figures are stored under \path{paper/benchmark_runs/}, together with per-record provenance and dataset inspections. The manuscript describes Graphite version 0.1.0 at release tag \texttt{v0.1.0}, source commit \texttt{c873f8b491afe3f8896d40288f87f2a4653fde19}; the preprint source is on the \texttt{arxiv-preprint} branch.
 
 Graphite is distributed under the GNU General Public License version 3.
 
