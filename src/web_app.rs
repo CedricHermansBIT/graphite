@@ -4,7 +4,7 @@ use egui::containers::panel::{CentralPanel, Panel};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::atomic::AtomicBool,
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 use wasm_bindgen::{JsCast, prelude::*};
@@ -30,6 +30,22 @@ enum InputMode {
     Session,
 }
 type Incoming = Rc<RefCell<Option<Result<(InputMode, String, Vec<u8>), String>>>>;
+
+struct PreparedWebGraph {
+    name: String,
+    gfa: GfaGraph,
+    view: ViewGraph,
+    layout: Layout,
+    stats: AssemblyStats,
+    session: Option<Session>,
+}
+
+struct FinishedWebLoad {
+    result: Result<PreparedWebGraph, String>,
+    retry_session: Option<Session>,
+}
+
+type WebLoadQueue = Arc<Mutex<Option<FinishedWebLoad>>>;
 
 #[wasm_bindgen]
 pub struct WebHandle {
@@ -104,6 +120,8 @@ impl ColorRanges {
 
 struct WebApp {
     incoming: Incoming,
+    load_queue: WebLoadQueue,
+    loading: bool,
     input_mode: Rc<Cell<InputMode>>,
     file_targets: Rc<RefCell<Vec<(Rect, InputMode)>>>,
     file_pointer_opened: Rc<Cell<bool>>,
@@ -164,6 +182,7 @@ impl WebApp {
         }
 
         let incoming: Incoming = Rc::new(RefCell::new(None));
+        let load_queue: WebLoadQueue = Arc::new(Mutex::new(None));
         let input_mode = Rc::new(Cell::new(InputMode::Graph));
         let file_targets: Rc<RefCell<Vec<(Rect, InputMode)>>> = Rc::new(RefCell::new(Vec::new()));
         let file_pointer_opened = Rc::new(Cell::new(false));
@@ -274,6 +293,8 @@ impl WebApp {
         pointer_callback.forget();
         Self {
             incoming,
+            load_queue,
+            loading: false,
             input_mode,
             file_targets,
             file_pointer_opened,
@@ -337,35 +358,102 @@ impl WebApp {
         input.click();
     }
 
-    fn load(&mut self, name: String, bytes: Vec<u8>) {
+    fn start_load(&mut self, name: String, bytes: Vec<u8>) {
+        if self.loading {
+            self.status = "A graph is already loading.".into();
+            return;
+        }
+
         let session = self.pending_session.take();
         let retry_session = session.clone();
-        let result = (|| -> anyhow::Result<(GfaGraph,ViewGraph,Layout,AssemblyStats,Option<Session>)> {
-            let gfa = gfa::parse_gfa_owned(bytes)?;
-            anyhow::ensure!(!self.strict_parsing || gfa.diagnostics.is_empty(),
-                "Strict parsing rejected {} warning(s)",gfa.diagnostics.len());
-            if let Some(saved) = &session {
+        let filter = session
+            .as_ref()
+            .map(|saved| saved.filter.clone())
+            .unwrap_or_else(|| self.filter.clone());
+        let strict_parsing = self.strict_parsing;
+        let queue = self.load_queue.clone();
+
+        self.loading = true;
+        self.error_message = None;
+        self.status = format!("Loading {name}…");
+
+        rayon::spawn(move || {
+            let result = (|| -> anyhow::Result<PreparedWebGraph> {
+                let gfa = gfa::parse_gfa_owned(bytes)?;
                 anyhow::ensure!(
-                    saved.source_sha256 == session::fingerprint(&gfa),
-                    "The selected GFA does not match this session"
+                    !strict_parsing || gfa.diagnostics.is_empty(),
+                    "Strict parsing rejected {} warning(s)",
+                    gfa.diagnostics.len()
                 );
+                if let Some(saved) = &session {
+                    anyhow::ensure!(
+                        saved.source_sha256 == session::fingerprint(&gfa),
+                        "The selected GFA does not match this session"
+                    );
+                }
+
+                let stats = AssemblyStats::compute(&gfa);
+                let view = ViewGraph::from_gfa(&gfa, &filter);
+                let mut layout = if let Some(saved) = &session {
+                    Layout::try_from_positions(
+                        &view,
+                        &saved.positions,
+                        &AtomicBool::new(false),
+                    )?
+                } else {
+                    Layout::try_new_with_graph_backend(
+                        &view,
+                        LayoutBackend::Rust,
+                        &AtomicBool::new(false),
+                    )?
+                };
+
+                if let Some(saved) = &session {
+                    saved.validate_graph(&gfa, &view, &layout)?;
+                    layout.restore_positions(&saved.positions)?;
+                }
+
+                Ok(PreparedWebGraph {
+                    name,
+                    gfa,
+                    view,
+                    layout,
+                    stats,
+                    session,
+                })
+            })()
+            .map_err(|error| format!("{error:#}"));
+
+            if let Ok(mut slot) = queue.lock() {
+                *slot = Some(FinishedWebLoad {
+                    result,
+                    retry_session,
+                });
             }
-            let filter = session.as_ref().map(|s|s.filter.clone()).unwrap_or_else(||self.filter.clone());
-            let stats = AssemblyStats::compute(&gfa);
-            let view = ViewGraph::from_gfa(&gfa,&filter);
-            let mut layout = if let Some(saved) = &session {
-                Layout::try_from_positions(&view,&saved.positions,&AtomicBool::new(false))?
-            } else {
-                Layout::try_new_with_graph_backend(&view,LayoutBackend::Rust,&AtomicBool::new(false))?
-            };
-            if let Some(saved) = &session {
-                saved.validate_graph(&gfa,&view,&layout)?;
-                layout.restore_positions(&saved.positions)?;
-            }
-            Ok((gfa,view,layout,stats,session))
-        })();
-        match result {
-            Ok((gfa, view, layout, stats, session)) => {
+        });
+    }
+
+    fn poll_load(&mut self) {
+        let finished = self
+            .load_queue
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        let Some(finished) = finished else {
+            return;
+        };
+
+        self.loading = false;
+        match finished.result {
+            Ok(prepared) => {
+                let PreparedWebGraph {
+                    name,
+                    gfa,
+                    view,
+                    layout,
+                    stats,
+                    session,
+                } = prepared;
                 self.status = format!(
                     "{name}: {} segments, {} links, {} components, {} warnings",
                     view.node_count(),
@@ -378,7 +466,7 @@ impl WebApp {
                 self.color_ranges = ColorRanges::from_graph(&view);
                 self.applied_filter = session
                     .as_ref()
-                    .map(|s| s.filter.clone())
+                    .map(|saved| saved.filter.clone())
                     .unwrap_or_else(|| self.filter.clone());
                 self.filter = self.applied_filter.clone();
                 self.stats = Some(stats);
@@ -390,6 +478,7 @@ impl WebApp {
                 self.selection.clear();
                 self.component_query.clear();
                 self.component_page = 0;
+
                 if let Some(saved) = session {
                     self.display = saved.display;
                     self.overlays = saved.overlays;
@@ -403,8 +492,8 @@ impl WebApp {
                 }
             }
             Err(error) => {
-                self.pending_session = retry_session;
-                self.status = format!("Could not load {name}: {error:#}");
+                self.pending_session = finished.retry_session;
+                self.status = format!("Could not load graph: {error}");
                 self.error_message = Some(self.status.clone());
             }
         }
@@ -735,8 +824,11 @@ impl WebApp {
                         }
                         ui.close();
                     }
-                    if ui.button("Open example graph…").clicked() {
-                        self.load(
+                    if ui
+                        .add_enabled(!self.loading, egui::Button::new("Open example graph…"))
+                        .clicked()
+                    {
+                        self.start_load(
                             "example.gfa".into(),
                             include_bytes!("../examples/example.gfa").to_vec(),
                         );
@@ -1271,10 +1363,11 @@ impl eframe::App for WebApp {
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
+        self.poll_load();
         let incoming = self.incoming.borrow_mut().take();
         if let Some(result) = incoming {
             match result {
-                Ok((InputMode::Graph, name, bytes)) => self.load(name, bytes),
+                Ok((InputMode::Graph, name, bytes)) => self.start_load(name, bytes),
                 Ok((InputMode::Session, name, bytes)) => {
                     match serde_json::from_slice::<Session>(&bytes) {
                         Ok(session) => match session.validate_basic() {
@@ -1364,7 +1457,7 @@ impl eframe::App for WebApp {
                 self.render_cache = Some(RenderCache::new(view, layout));
             }
         }
-        if self.pending_rebuild.is_some() {
+        if self.pending_rebuild.is_some() || self.loading {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
