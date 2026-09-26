@@ -5,7 +5,7 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     sync::{Arc, Mutex, atomic::AtomicBool},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
