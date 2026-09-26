@@ -15,8 +15,6 @@
   <canvas id="graphite"></canvas>
   <div id="error" role="alert"></div>
   <script type="module">
-    import init, { initThreadPool, WebHandle } from './pkg/graphite.js';
-
     async function ensureCrossOriginIsolation() {
       const reloadKey = 'graphite-coi-reload';
       if (crossOriginIsolated) {
@@ -42,6 +40,7 @@
 
     try {
       await ensureCrossOriginIsolation();
+      const { default: init, initThreadPool, WebHandle } = await import('./pkg/graphite.js');
       await init();
       await initThreadPool(Math.min(navigator.hardwareConcurrency || 4, 8));
       const app = new WebHandle();
