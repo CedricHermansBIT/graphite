@@ -506,7 +506,10 @@ pub fn parse_gfa_owned(mut bytes: Vec<u8>) -> Result<GfaGraph> {
             b'W' => {
                 if let Some(field) = tab_fields(line).nth(6) {
                     path_walk_steps = path_walk_steps.saturating_add(
-                        field.iter().filter(|&&byte| byte == b'>' || byte == b'<').count(),
+                        field
+                            .iter()
+                            .filter(|&&byte| byte == b'>' || byte == b'<')
+                            .count(),
                     );
                 }
             }
