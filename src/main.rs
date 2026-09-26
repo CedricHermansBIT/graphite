@@ -22,7 +22,7 @@ mod visuals;
 
 use anyhow::{Context, Result};
 use argh::FromArgs;
-use std::time::Instant;
+use web_time::Instant;
 
 #[derive(FromArgs)]
 /// Graphite - optimized for large assembly graphs

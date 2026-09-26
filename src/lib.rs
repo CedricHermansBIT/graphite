@@ -1,3 +1,8 @@
+#![cfg_attr(
+    target_arch = "wasm32",
+    deny(clippy::disallowed_methods, clippy::disallowed_types)
+)]
+
 //! Shared browser entry point. The desktop binary keeps its existing startup path.
 
 #[cfg(all(target_arch = "wasm32", feature = "ogdf"))]

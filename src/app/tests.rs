@@ -3,7 +3,7 @@ use crate::app_core::InteractionMode;
 use crate::ui::ThemePreset;
 use eframe::App;
 use egui::{Key, Pos2, Rect, Vec2};
-use std::time::Instant;
+use web_time::Instant;
 
 fn empty_app(context: &Context) -> GfaApp {
     GfaApp::new(

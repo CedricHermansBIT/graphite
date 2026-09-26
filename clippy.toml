@@ -1,0 +1,15 @@
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "std::thread::spawn panics on wasm32-unknown-unknown; browser work must use the wasm-bindgen-rayon worker pool" },
+    { path = "std::thread::sleep", reason = "std::thread::sleep is not a browser scheduling primitive; use cooperative frame/worker scheduling" },
+]
+
+disallowed-types = [
+    { path = "std::time::Instant", reason = "std::time::Instant::now panics on wasm32-unknown-unknown", replacement = "web_time::Instant" },
+    { path = "std::time::SystemTime", reason = "std::time::SystemTime::now panics on wasm32-unknown-unknown", replacement = "web_time::SystemTime" },
+    { path = "std::thread::JoinHandle", reason = "native std threads are unsupported on wasm32-unknown-unknown" },
+    { path = "std::fs::File", reason = "std::fs is unavailable in the browser; use the browser File/Blob APIs" },
+    { path = "std::process::Command", reason = "process spawning is unavailable in the browser" },
+    { path = "std::net::TcpStream", reason = "std networking is unavailable in the browser; use browser networking APIs" },
+    { path = "std::net::TcpListener", reason = "std networking is unavailable in the browser" },
+    { path = "std::net::UdpSocket", reason = "std networking is unavailable in the browser" },
+]

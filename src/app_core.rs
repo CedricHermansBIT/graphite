@@ -4,7 +4,7 @@
 //! adapters. Shared graph-view state lives here so behavior cannot drift between
 //! the two applications.
 
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use egui::containers::panel::Panel;
 use egui::{Color32, Context, Key, Pos2, Rect, Response, Vec2};

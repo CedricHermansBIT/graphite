@@ -2,6 +2,7 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
 
 use crate::gfa::Strand;
@@ -1957,7 +1958,7 @@ impl Layout {
         let query_r = k * 3.0;
         let cell_size = query_r;
         #[cfg(test)]
-        let profile_start = std::time::Instant::now();
+        let profile_start = web_time::Instant::now();
         self.grid.rebuild(
             &self.positions,
             cell_size,
@@ -2209,12 +2210,14 @@ impl GridIndex {
 
 // ── LayoutRunner ─────────────────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct DragState {
     held: Option<(Pos2, usize)>,
     pending: Option<(Pos2, usize)>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct LayoutRunner {
     pub layout: Arc<Mutex<Layout>>,
     pub running: Arc<std::sync::atomic::AtomicBool>,
@@ -2222,6 +2225,7 @@ pub struct LayoutRunner {
     attractor: Arc<Mutex<DragState>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl LayoutRunner {
     pub fn from_layout(
         graph: Arc<ViewGraph>,
@@ -2237,7 +2241,7 @@ impl LayoutRunner {
         let running2 = running.clone();
         let attractor2 = attractor.clone();
         std::thread::spawn(move || {
-            let mut published = std::time::Instant::now();
+            let mut published = web_time::Instant::now();
             let mut was_dragging = false;
             loop {
                 if !running2.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2269,7 +2273,7 @@ impl LayoutRunner {
                         shared.iteration = local.iteration;
                         shared.converged = local.converged;
                     }
-                    published = std::time::Instant::now();
+                    published = web_time::Instant::now();
                 }
                 if att.is_some() {
                     std::thread::sleep(std::time::Duration::from_millis(4));
@@ -2327,6 +2331,7 @@ impl LayoutRunner {
         }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for LayoutRunner {
     fn drop(&mut self) {
         self.stop();
@@ -2508,7 +2513,7 @@ mod tests {
     #[test]
     #[ignore = "performance comparison; run with benchmarks/benchmark_packing.py"]
     fn packing_benchmark() {
-        use std::time::Instant;
+        use web_time::Instant;
         let repeats = std::env::var("GRAPHITE_PACKING_REPEATS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -2845,18 +2850,18 @@ mod tests {
     #[ignore = "set GFA_BENCH_PATH to a local GFA file"]
     fn benchmark_gfa() {
         let path = std::env::var("GFA_BENCH_PATH").expect("GFA_BENCH_PATH is required");
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let parsed = crate::gfa::parse_gfa(&path).unwrap();
         let parse_time = start.elapsed();
         let graph = ViewGraph::from_gfa(&parsed, &crate::filter::FilterParams::default());
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let mut layout = Layout::new_with_graph(&graph);
         let init = start.elapsed();
         let steps = std::env::var("GFA_BENCH_STEPS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(20);
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         for _ in 0..steps {
             layout.step(&graph, &LayoutParams::default(), None);
         }
@@ -2893,10 +2898,10 @@ mod tests {
         use Strand::Forward as F;
         let links: Vec<_> = (1..10000).map(|i| (i - 1, F, i, F)).collect();
         let graph = graph(&vec![200.0; 10000], &links);
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let mut layout = Layout::new_with_graph(&graph);
         let init = start.elapsed();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         for _ in 0..5 {
             layout.step(&graph, &LayoutParams::default(), None);
         }
@@ -2968,10 +2973,10 @@ mod tests {
         let mut layout = Layout::new_with_graph(&empty);
         layout.step(&empty, &LayoutParams::default(), None);
         let graph = graph(&vec![200.0; 10000], &[]);
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let mut layout = Layout::new_with_graph(&graph);
         let init = start.elapsed();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         for _ in 0..5 {
             layout.step(&graph, &LayoutParams::default(), None);
         }
