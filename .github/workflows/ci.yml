@@ -48,3 +48,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev
       - run: cargo test --locked --features ogdf
+
+  web:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-20
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - run: ./scripts/build-web.sh
