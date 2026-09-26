@@ -54,7 +54,7 @@ pub fn fingerprint(gfa: &GfaGraph) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub const MAX_WEB_SESSION_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_WEB_SESSION_BYTES: usize = 128 * 1024 * 1024;
 
 impl Session {
     pub fn validate_basic(&self) -> Result<()> {
