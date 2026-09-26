@@ -395,11 +395,7 @@ impl WebApp {
                 let stats = AssemblyStats::compute(&gfa);
                 let view = ViewGraph::from_gfa(&gfa, &filter);
                 let mut layout = if let Some(saved) = &session {
-                    Layout::try_from_positions(
-                        &view,
-                        &saved.positions,
-                        &AtomicBool::new(false),
-                    )?
+                    Layout::try_from_positions(&view, &saved.positions, &AtomicBool::new(false))?
                 } else {
                     Layout::try_new_with_graph_backend(
                         &view,
@@ -434,11 +430,7 @@ impl WebApp {
     }
 
     fn poll_load(&mut self) {
-        let finished = self
-            .load_queue
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take());
+        let finished = self.load_queue.lock().ok().and_then(|mut slot| slot.take());
         let Some(finished) = finished else {
             return;
         };
