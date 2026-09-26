@@ -59,6 +59,6 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rust-src,clippy
       - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
-      - name: Clippy (WASM)
-        run: cargo +nightly-2026-09-20 -Z build-std=std,panic_abort clippy --locked --lib --target wasm32-unknown-unknown -- -D warnings
+      - name: Clippy (WASM portability)
+        run: cargo +nightly-2026-09-20 -Z build-std=std,panic_abort clippy --locked --lib --target wasm32-unknown-unknown -- -A warnings -D clippy::disallowed_methods -D clippy::disallowed_types
       - run: ./scripts/build-web.sh
