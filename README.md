@@ -358,7 +358,7 @@ build performs parsing and the initial layout on the UI thread, so large graphs
 can pause the page while opening.
 The browser refuses GFA inputs above 256 MiB, gzip streams that expand beyond
 256 MiB, graphs above 500,000 segments or 1,000,000 connections, paths/walks above
-2,000,000 total steps, layouts above 3,000,000 physics points, sessions above 64 MiB,
+2,000,000 total steps, layouts above 3,000,000 physics points, sessions above 128 MiB,
 and PNG exports above 16 million pixels. The desktop app remains preferable for very
 large GFA files.
 
