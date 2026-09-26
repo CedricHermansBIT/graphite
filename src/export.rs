@@ -4,11 +4,9 @@ use ab_glyph::{Font, FontRef, ScaleFont};
 use anyhow::Result;
 use egui::Color32;
 use image::{ImageBuffer, Rgba};
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    path::Path,
-};
+use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs::File, io::BufWriter, path::Path};
 
 use crate::gfa::{GfaGraph, GfaVersion};
 use crate::graph::{EdgeKind, ViewGraph};
@@ -17,6 +15,7 @@ use crate::render::{RenderParams, color_for_node};
 use crate::selection::Selection;
 
 /// Export selected node sequences to a FASTA file.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_fasta(
     path: &Path,
     gfa: &GfaGraph,
@@ -48,6 +47,7 @@ pub fn export_fasta(
 }
 
 /// Export statistics for all (or selected) segments to CSV.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_csv(
     path: &Path,
     gfa: &GfaGraph,
@@ -204,6 +204,7 @@ impl FigureOptions {
 
 /// Write alongside the destination, then replace it only after a successful write.
 /// In particular, an error cannot leave an existing export truncated.
+#[cfg(not(target_arch = "wasm32"))]
 fn atomic_write(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     let parent = path
         .parent()
@@ -220,6 +221,7 @@ fn atomic_write(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Res
 ///
 /// This base variant is used by the benchmark runner and intentionally omits
 /// interactive metadata overlays.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_svg(
     path: &Path,
     graph: &ViewGraph,
@@ -240,6 +242,7 @@ pub fn export_svg(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_svg_with_options(
     path: &Path,
     gfa: &GfaGraph,
@@ -440,6 +443,7 @@ fn render_svg_impl(
 ///
 /// This base variant is used by the benchmark runner and omits interactive
 /// metadata overlays.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_png(
     path: &Path,
     graph: &ViewGraph,
@@ -461,6 +465,7 @@ pub fn export_png(
 
 /// Export the current interactive view, including active GFA metadata overlays.
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_png_with_options(
     path: &Path,
     gfa: &GfaGraph,
