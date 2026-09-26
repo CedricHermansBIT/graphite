@@ -386,10 +386,7 @@ impl WebApp {
                     gfa.diagnostics.len()
                 );
                 if let Some(saved) = &session {
-                    anyhow::ensure!(
-                        saved.source_sha256 == session::fingerprint(&gfa),
-                        "The selected GFA does not match this session"
-                    );
+                    saved.validate_source(&gfa)?;
                 }
 
                 let stats = AssemblyStats::compute(&gfa);
@@ -405,7 +402,7 @@ impl WebApp {
                 };
 
                 if let Some(saved) = &session {
-                    saved.validate_graph(&gfa, &view, &layout)?;
+                    saved.validate_graph_state(&gfa, &view, &layout)?;
                     layout.restore_positions(&saved.positions)?;
                 }
 
