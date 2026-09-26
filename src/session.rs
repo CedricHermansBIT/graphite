@@ -53,7 +53,58 @@ pub fn fingerprint(gfa: &GfaGraph) -> String {
     format!("{:x}", Sha256::digest(&gfa.mmap[..]))
 }
 
+#[cfg(target_arch = "wasm32")]
+pub const MAX_WEB_SESSION_BYTES: usize = 64 * 1024 * 1024;
+
 impl Session {
+    pub fn validate_basic(&self) -> Result<()> {
+        ensure!(
+            self.format_version == 1,
+            "Unsupported session version {}",
+            self.format_version
+        );
+        ensure!(
+            self.zoom.is_finite() && (0.00001..=1000.0).contains(&self.zoom),
+            "Invalid session zoom"
+        );
+        ensure!(
+            self.pan
+                .iter()
+                .chain(self.positions.iter().flatten())
+                .all(|v| v.is_finite() && v.abs() < 1.0e12),
+            "Invalid session coordinates"
+        );
+        ensure!(
+            self.point_counts.len() == self.node_names.len(),
+            "Invalid session segment table"
+        );
+        ensure!(
+            self.point_counts.iter().all(|&n| (1..=64).contains(&n)),
+            "Invalid session point counts"
+        );
+        ensure!(
+            self.point_counts
+                .iter()
+                .try_fold(0usize, |a, &b| a.checked_add(b))
+                == Some(self.positions.len()),
+            "Invalid session position count"
+        );
+        ensure!(
+            self.selection.iter().all(|&n| n < self.node_names.len()),
+            "Invalid session selection"
+        );
+        ensure!(valid_display(&self.display), "Invalid session display settings");
+        ensure!(
+            self.filter
+                .min_depth
+                .into_iter()
+                .chain(self.filter.max_depth)
+                .all(|v| v.is_finite() && v >= 0.0),
+            "Invalid session depth filter"
+        );
+        Ok(())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path).context("Cannot open session")?;
@@ -63,59 +114,7 @@ impl Session {
         );
         let mut session: Self =
             serde_json::from_reader(BufReader::new(file)).context("Invalid Graphite session")?;
-        ensure!(
-            session.format_version == 1,
-            "Unsupported session version {}",
-            session.format_version
-        );
-        ensure!(
-            session.zoom.is_finite() && (0.00001..=1000.0).contains(&session.zoom),
-            "Invalid session zoom"
-        );
-        ensure!(
-            session
-                .pan
-                .iter()
-                .chain(session.positions.iter().flatten())
-                .all(|v| v.is_finite() && v.abs() < 1.0e12),
-            "Invalid session coordinates"
-        );
-        ensure!(
-            session.point_counts.len() == session.node_names.len(),
-            "Invalid session segment table"
-        );
-        ensure!(
-            session.point_counts.iter().all(|&n| (1..=64).contains(&n)),
-            "Invalid session point counts"
-        );
-        ensure!(
-            session
-                .point_counts
-                .iter()
-                .try_fold(0usize, |a, &b| a.checked_add(b))
-                == Some(session.positions.len()),
-            "Invalid session position count"
-        );
-        ensure!(
-            session
-                .selection
-                .iter()
-                .all(|&n| n < session.node_names.len()),
-            "Invalid session selection"
-        );
-        ensure!(
-            valid_display(&session.display),
-            "Invalid session display settings"
-        );
-        ensure!(
-            session
-                .filter
-                .min_depth
-                .into_iter()
-                .chain(session.filter.max_depth)
-                .all(|v| v.is_finite() && v >= 0.0),
-            "Invalid session depth filter"
-        );
+        session.validate_basic()?;
         if session.source.is_relative() {
             session.source = path
                 .parent()
