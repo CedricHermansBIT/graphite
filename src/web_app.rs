@@ -51,7 +51,7 @@ impl WebHandle {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|cc| Ok(Box::new(WebApp::new(cc.egui_ctx.clone())))),
+                Box::new(|cc| Ok(Box::new(WebApp::new(cc)))),
             )
             .await
     }
@@ -150,7 +150,19 @@ struct WebApp {
 }
 
 impl WebApp {
-    fn new(ctx: Context) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let ctx = cc.egui_ctx.clone();
+        let mut initial_display = cc
+            .storage
+            .and_then(|storage| {
+                eframe::get_value::<session::Preferences>(storage, "graphite.preferences.v1")
+            })
+            .map(|preferences| preferences.display)
+            .unwrap_or_default();
+        if !session::valid_display(&initial_display) {
+            initial_display = DisplayOptions::default();
+        }
+
         let incoming: Incoming = Rc::new(RefCell::new(None));
         let input_mode = Rc::new(Cell::new(InputMode::Graph));
         let file_targets: Rc<RefCell<Vec<(Rect, InputMode)>>> = Rc::new(RefCell::new(Vec::new()));
@@ -166,7 +178,7 @@ impl WebApp {
         let queue = incoming.clone();
         let mode = input_mode.clone();
         let input_for_event = input.clone();
-        configure_style(&ctx, ThemePreset::Graphite);
+        configure_style(&ctx, initial_display.theme);
         let callback = Closure::<dyn FnMut(_)>::new(move |_event: web_sys::Event| {
             let Some(file) = input_for_event.files().and_then(|files| files.item(0)) else {
                 return;
@@ -176,11 +188,15 @@ impl WebApp {
             let ctx = ctx.clone();
             let picked_mode = mode.get();
             let size = file.size();
-            let limit = gfa::MAX_WEB_GFA_BYTES;
+            let limit = match picked_mode {
+                InputMode::Graph => gfa::MAX_WEB_GFA_BYTES,
+                InputMode::Session => session::MAX_WEB_SESSION_BYTES,
+            };
             if !size.is_finite() || size > limit as f64 {
                 *queue.borrow_mut() = Some(Err(format!(
-                    "{name} is {:.1} MiB. The browser limit is 256 MiB; open larger graphs in desktop Graphite.",
-                    size / (1024.0 * 1024.0)
+                    "{name} is {:.1} MiB. The browser limit for this file type is {:.0} MiB.",
+                    size / (1024.0 * 1024.0),
+                    limit as f64 / (1024.0 * 1024.0)
                 )));
                 ctx.request_repaint();
                 input_for_event.set_value("");
@@ -193,7 +209,8 @@ impl WebApp {
                         let length = array.length() as usize;
                         if length > limit {
                             Err(format!(
-                                "{name} exceeds the browser 256 MiB limit; open it in desktop Graphite."
+                                "{name} exceeds the browser {:.0} MiB limit.",
+                                limit as f64 / (1024.0 * 1024.0)
                             ))
                         } else {
                             let mut bytes = Vec::new();
@@ -269,7 +286,7 @@ impl WebApp {
             color_ranges: ColorRanges::default(),
             filter: FilterParams::default(),
             applied_filter: FilterParams::default(),
-            display: DisplayOptions::default(),
+            display: initial_display,
             overlays: OverlayOptions::default(),
             selection: Selection::default(),
             history: History::default(),
@@ -327,6 +344,12 @@ impl WebApp {
             let gfa = gfa::parse_gfa_owned(bytes)?;
             anyhow::ensure!(!self.strict_parsing || gfa.diagnostics.is_empty(),
                 "Strict parsing rejected {} warning(s)",gfa.diagnostics.len());
+            if let Some(saved) = &session {
+                anyhow::ensure!(
+                    saved.source_sha256 == session::fingerprint(&gfa),
+                    "The selected GFA does not match this session"
+                );
+            }
             let filter = session.as_ref().map(|s|s.filter.clone()).unwrap_or_else(||self.filter.clone());
             let stats = AssemblyStats::compute(&gfa);
             let view = ViewGraph::from_gfa(&gfa,&filter);
@@ -1238,6 +1261,14 @@ impl WebApp {
 }
 
 impl eframe::App for WebApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let preferences = session::Preferences {
+            display: self.display.clone(),
+            recent_files: Vec::new(),
+        };
+        eframe::set_value(storage, "graphite.preferences.v1", &preferences);
+    }
+
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         let incoming = self.incoming.borrow_mut().take();
@@ -1246,17 +1277,13 @@ impl eframe::App for WebApp {
                 Ok((InputMode::Graph, name, bytes)) => self.load(name, bytes),
                 Ok((InputMode::Session, name, bytes)) => {
                     match serde_json::from_slice::<Session>(&bytes) {
-                        Ok(session)
-                            if session.format_version == 1
-                                && session.zoom.is_finite()
-                                && (0.00001..=1000.0).contains(&session.zoom)
-                                && session.pan.iter().all(|v| v.is_finite())
-                                && session::valid_display(&session.display) =>
-                        {
-                            self.pending_session = Some(session);
-                            self.status = format!("Choose the GFA used by {name}.");
-                        }
-                        Ok(_) => self.status = "Unsupported session version.".into(),
+                        Ok(session) => match session.validate_basic() {
+                            Ok(()) => {
+                                self.pending_session = Some(session);
+                                self.status = format!("Choose the GFA used by {name}.");
+                            }
+                            Err(error) => self.status = format!("Invalid session: {error:#}"),
+                        },
                         Err(error) => self.status = format!("Invalid session: {error}"),
                     }
                 }
