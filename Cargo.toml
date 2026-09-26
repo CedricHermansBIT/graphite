@@ -69,4 +69,3 @@ web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElemen
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
-tempfile = "3"
