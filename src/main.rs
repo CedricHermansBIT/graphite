@@ -2,6 +2,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+mod app_core;
 #[cfg(feature = "cuda")]
 mod cuda_layout;
 mod export;

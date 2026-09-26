@@ -7,6 +7,8 @@ compile_error!("The optional Graphite GPU layout backend is not enabled for the 
 #[cfg(all(target_arch = "wasm32", feature = "cuda"))]
 compile_error!("CUDA is native-only and cannot be enabled for the browser build.");
 #[cfg(target_arch = "wasm32")]
+mod app_core;
+#[cfg(target_arch = "wasm32")]
 mod export;
 #[cfg(target_arch = "wasm32")]
 mod filter;

@@ -15,6 +15,7 @@ use crate::filter::FilterParams;
 use crate::gfa::GfaGraph;
 use crate::graph::ViewGraph;
 use crate::layout::Layout;
+use crate::selection::Selection;
 use crate::ui::{DisplayOptions, OverlayOptions};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -57,6 +58,43 @@ pub fn fingerprint(gfa: &GfaGraph) -> String {
 pub const MAX_WEB_SESSION_BYTES: usize = 128 * 1024 * 1024;
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture(
+        source: PathBuf,
+        backend: String,
+        gfa: &GfaGraph,
+        view: &ViewGraph,
+        layout: &Layout,
+        filter: FilterParams,
+        display: DisplayOptions,
+        overlays: OverlayOptions,
+        selection: &Selection,
+        zoom: f32,
+        pan: [f32; 2],
+    ) -> Self {
+        let mut selected_nodes: Vec<_> = selection.nodes.iter().copied().collect();
+        selected_nodes.sort_unstable();
+        Self {
+            format_version: 1,
+            source,
+            source_sha256: fingerprint(gfa),
+            backend,
+            filter,
+            display,
+            overlays,
+            node_names: view
+                .nodes
+                .iter()
+                .map(|node| node.name.to_string())
+                .collect(),
+            point_counts: layout.node_pts_count.clone(),
+            positions: layout.positions.clone(),
+            selection: selected_nodes,
+            zoom,
+            pan,
+        }
+    }
+
     pub fn validate_basic(&self) -> Result<()> {
         ensure!(
             self.format_version == 1,
