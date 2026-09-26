@@ -79,6 +79,33 @@ fn build_ogdf() {
     }
 
     native.compile("bandage_layout");
+
+    // The package now also has a cdylib/rlib target for the browser. Keep the
+    // native wrapper linked into the desktop binary explicitly as well.
+    let out_dir = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"),
+    );
+    if target_env == "msvc" {
+        println!(
+            "cargo:rustc-link-arg-bin=graphite={}",
+            out_dir.join("bandage_layout.lib").display()
+        );
+        println!("cargo:rustc-link-arg-bin=graphite=psapi.lib");
+    } else {
+        println!(
+            "cargo:rustc-link-arg-bin=graphite={}",
+            out_dir.join("libbandage_layout.a").display()
+        );
+        if target_os == "macos" {
+            println!("cargo:rustc-link-arg-bin=graphite=-lc++");
+        } else {
+            println!("cargo:rustc-link-arg-bin=graphite=-lstdc++");
+        }
+        if target_os == "windows" {
+            println!("cargo:rustc-link-arg-bin=graphite=-lpsapi");
+        }
+    }
+
     if target_os == "windows" {
         println!("cargo:rustc-link-lib=psapi");
     }
