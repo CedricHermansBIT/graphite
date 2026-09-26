@@ -671,11 +671,13 @@ impl WebApp {
                     zoom: self.zoom,
                     pan: [self.pan.x, self.pan.y],
                 };
-                Ok((
-                    "graph.graphite.json",
-                    "application/json",
-                    serde_json::to_vec(&session)?,
-                ))
+                let bytes = serde_json::to_vec(&session)?;
+                anyhow::ensure!(
+                    bytes.len() <= session::MAX_WEB_SESSION_BYTES,
+                    "Browser sessions are limited to {} MiB",
+                    session::MAX_WEB_SESSION_BYTES / (1024 * 1024)
+                );
+                Ok(("graph.graphite.json", "application/json", bytes))
             }
         })();
         match result {
