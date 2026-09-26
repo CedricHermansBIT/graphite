@@ -340,9 +340,9 @@ file next so Graphite can verify its hash. Files stay in the browser; the browse
 keeps input bytes in WebAssembly memory. Native Graphite continues to memory-map plain
 GFA files and decompressed gzip temporary files.
 
-The browser build uses `wasm-bindgen-rayon` Web Workers for Rayon operations. Install
-a recent Rust nightly with `rust-src` and the `wasm32-unknown-unknown` target, and
-`wasm-bindgen-cli` at the version used in `Cargo.lock` (currently 0.2.128). Then run:
+The browser build uses `wasm-bindgen-rayon` Web Workers for Rayon operations. The
+web toolchain is pinned to `nightly-2026-09-20`; install it with `rust-src` and the
+`wasm32-unknown-unknown` target, plus `wasm-bindgen-cli 0.2.128`. Then run:
 
 ```sh
 ./scripts/build-web.sh
@@ -357,6 +357,19 @@ WebAssembly atomics, bulk memory, and imported shared memory. The first browser
 build performs parsing and the initial layout on the UI thread, so large graphs
 can pause the page while opening.
 The browser refuses GFA inputs above 256 MiB, gzip streams that expand beyond
-256 MiB, graphs above 500,000 segments or 1,000,000 connections, and PNG exports
-above 16 million pixels. These limits keep failures visible before WebAssembly
-runs out of memory. The desktop app remains preferable for very large GFA files.
+256 MiB, graphs above 500,000 segments or 1,000,000 connections, paths/walks above
+2,000,000 total steps, layouts above 3,000,000 physics points, sessions above 64 MiB,
+and PNG exports above 16 million pixels. The desktop app remains preferable for very
+large GFA files.
+
+### GitHub Pages
+
+`.github/workflows/pages.yml` builds the `wasm` branch and deploys `web/` to
+GitHub Pages. The expected project URL is
+<https://cedrichermansbit.github.io/graphite/>.
+
+GitHub Pages does not expose custom per-response COOP/COEP headers. Graphite therefore
+ships a small same-origin service worker that injects the headers before the threaded
+WebAssembly app starts. The first visit reloads once; after that
+`crossOriginIsolated` is available and the Rayon worker pool can start. The local
+development server still sends the headers directly and does not need the reload.
