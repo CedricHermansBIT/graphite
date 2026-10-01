@@ -15,6 +15,7 @@
   <canvas id="graphite"></canvas>
   <div id="error" role="alert"></div>
   <script type="module">
+    import { loadGfaFromUrl } from './url-loader.mjs';
     async function ensureCrossOriginIsolation() {
       const reloadKey = 'graphite-coi-reload';
       if (crossOriginIsolated) {
@@ -46,6 +47,7 @@
       const app = new WebHandle();
       await app.start(document.getElementById('graphite'));
       window.graphiteApp = app;
+      await loadGfaFromUrl(app, location.href);
     } catch (error) {
       console.error(error);
       const message = document.getElementById('error');

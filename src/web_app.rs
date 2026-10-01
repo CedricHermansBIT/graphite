@@ -68,9 +68,44 @@ impl WebHandle {
             )
             .await
     }
+
+    /// Hand downloaded GFA bytes to the same loader used by the file picker.
+    pub fn load_gfa(&self, name: String, data: js_sys::Uint8Array) -> Result<(), JsValue> {
+        let mut app = self
+            .runner
+            .app_mut::<WebApp>()
+            .ok_or_else(|| JsValue::from_str("Graphite is not ready to load a graph."))?;
+        let length = data.length() as usize;
+        if length > gfa::MAX_WEB_GFA_BYTES {
+            return Err(JsValue::from_str(
+                "Linked GFA exceeds the browser 256 MiB limit.",
+            ));
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length).map_err(|_| {
+            JsValue::from_str(
+                "Not enough browser memory to open the linked GFA; use desktop Graphite.",
+            )
+        })?;
+        bytes.resize(length, 0);
+        data.copy_to(&mut bytes);
+        *app.incoming.borrow_mut() = Some(Ok((InputMode::Graph, name, bytes)));
+        app.error_message = None;
+        app.ctx.request_repaint();
+        Ok(())
+    }
+
+    pub fn set_load_status(&self, message: String, is_error: bool) {
+        if let Some(mut app) = self.runner.app_mut::<WebApp>() {
+            app.core.status_msg = message.clone();
+            app.error_message = is_error.then_some(message);
+            app.ctx.request_repaint();
+        }
+    }
 }
 
 struct WebApp {
+    ctx: Context,
     core: AppCore,
     incoming: Incoming,
     load_queue: WebLoadQueue,
@@ -214,6 +249,7 @@ impl WebApp {
         pointer_callback.forget();
         let core = AppCore::new(initial_display, "Open a GFA file to start.".into());
         Self {
+            ctx: cc.egui_ctx.clone(),
             core,
             incoming,
             load_queue,
@@ -630,6 +666,10 @@ impl WebApp {
 }
 
 impl eframe::App for WebApp {
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let preferences = session::Preferences {
             display: self.core.display.clone(),

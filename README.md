@@ -362,6 +362,54 @@ The browser refuses GFA inputs above 256 MiB, gzip streams that expand beyond
 and PNG exports above 16 million pixels. The desktop app remains preferable for very
 large GFA files.
 
+### Open a hosted GFA through a link
+
+Another tool or website can link directly to Graphite Web with a `gfa` query
+parameter. Graphite downloads that GFA (or gzip-compressed GFA), loads it, computes
+the layout, and displays it automatically. For example:
+
+```text
+https://cedrichermansbit.github.io/graphite/?gfa=https%3A%2F%2Fexample.org%2Fassembly.gfa
+```
+
+Build the link with URL encoding so the dataset URL can contain its own query
+parameters:
+
+```js
+const viewer = new URL('https://cedrichermansbit.github.io/graphite/');
+viewer.searchParams.set('gfa', datasetUrl);
+window.open(viewer.href, '_blank', 'noopener');
+```
+
+The dataset must be reachable through HTTP or HTTPS. Files on another origin must
+be served with CORS permission for the viewer (for example,
+`Access-Control-Allow-Origin: *` for public datasets). Requests omit cookies and
+HTTP authentication credentials; a direct signed download URL can be used when
+needed. Relative dataset URLs resolve against the viewer's URL. A local filesystem
+path cannot be opened through a link; local files use the file picker.
+
+The same browser graph and memory limits apply to linked files. Downloads stop at
+256 MiB even when the server omits or misreports `Content-Length`, and time out
+after two minutes. Download, parsing, and layout errors are displayed in Graphite.
+The file is downloaded directly from its host to the browser.
+
+For private analysis results, the submitting platform should check the user's
+authorization and generate a temporary signed URL granting download access to
+that one GFA. Its authenticated API can use POST to create the link; Graphite
+downloads the file with GET. The platform must also permit CORS requests from
+the Graphite viewer origin. Graphite itself does not need an upload server.
+
+The file URL can also be passed in the fragment (`#gfa=...`), which is recommended
+for signed URLs because fragments are not sent to the viewer's hosting server:
+
+```js
+const viewer = new URL('https://cedrichermansbit.github.io/graphite/');
+viewer.hash = new URLSearchParams({ gfa: signedDownloadUrl }).toString();
+window.open(viewer.href, '_blank', 'noopener');
+```
+
+Supply `gfa` once, in either the query or the fragment.
+
 ### GitHub Pages
 
 `.github/workflows/pages.yml` builds the `main` branch and deploys `web/` to
